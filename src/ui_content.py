@@ -331,6 +331,9 @@ INFO_CUSTOM_FPS = "Leave empty for auto-detect, or enter value (24/30/60)"
 LABEL_EDGE_BUFFER_SECONDS = "✂️ Rand-Puffer (Sekunden)"
 INFO_EDGE_BUFFER_SECONDS = "Anfang und Ende jedes Quellvideos werden um diese Anzahl Sekunden nicht für Clips verwendet."
 
+LABEL_CLIP_ORDER_MODE = "🔀 Clip-Reihenfolge"
+INFO_CLIP_ORDER_MODE = "Legt fest, in welcher Reihenfolge die Quellvideos im fertigen Video verwendet werden."
+
 # GPU & Processing
 LABEL_GPU_STATUS = "⚡ GPU Acceleration Status"
 

@@ -356,6 +356,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
                        preferred_videos: VideoFilesInput | None = None,
                        edge_buffer_seconds: float = 5.0,
+                       clip_order_mode: str = 'auto',
                        progress_callback: Callable[[str], None] | None = None,
                        console_logger: StageConsoleLogger | None = None) -> StatusResult:
     total_started = time.perf_counter()
@@ -454,6 +455,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             strict_unique_non_overlap=bool(strict_unique_non_overlap),
             preferred_videos=_as_existing_source_paths(preferred_videos),
             edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 5.0,
+            clip_order_mode=clip_order_mode or 'auto',
         )
 
         # Move to output folder
@@ -518,7 +520,8 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                  output_filename: str, processing_mode: str,
                  custom_fps: float, strict_unique_non_overlap: bool,
                  session_state: dict, preferred_videos: VideoFilesInput | None = None,
-                 edge_buffer_seconds: float = 5.0) -> Iterator[StatusResult]:
+                 edge_buffer_seconds: float = 5.0,
+                 clip_order_mode: str = 'auto') -> Iterator[StatusResult]:
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
     initial_status = _stage_status(1)
@@ -544,6 +547,7 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     session_state=session_state,
                     preferred_videos=preferred_videos,
                     edge_buffer_seconds=edge_buffer_seconds,
+                    clip_order_mode=clip_order_mode,
                     progress_callback=progress_callback,
                     console_logger=console_logger,
                 )
@@ -710,6 +714,10 @@ def create_ui() -> gr.Blocks:
                         info='Uses each selected source segment only once and prevents overlap inside the same source video.'
                     )
                     edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=5.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
+                    clip_order_mode = gr.Radio(
+                        choices=[('🤖 Automatisch (KI-Auswahl)', 'auto'), ('📅 Chronologisch (Aufnahmedatum)', 'chronological'), ('🔤 Alphabetisch (Dateiname)', 'name')],
+                        value='auto', label=LABEL_CLIP_ORDER_MODE, info=INFO_CLIP_ORDER_MODE
+                    )
 
                 with gr.Group():
                     gr.Markdown(f'### 🎬 Processing Mode')
@@ -734,7 +742,7 @@ def create_ui() -> gr.Blocks:
             inputs=[
                 audio_input, video_input,
                 output_filename, processing_mode, custom_fps, strict_mode,
-                session_state, preferred_videos_input, edge_buffer_seconds
+                session_state, preferred_videos_input, edge_buffer_seconds, clip_order_mode
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'

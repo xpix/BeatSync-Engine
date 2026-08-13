@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 from collections import Counter, deque
 from typing import Dict, List, Sequence
 
 import numpy as np
+
+CLIP_ORDER_MODES = ("auto", "chronological", "name")
 
 
 def _clamp(value, lo: float = 0.0, hi: float = 1.0, default: float = 0.0) -> float:
@@ -25,6 +28,29 @@ def _stable_rng(*parts) -> random.Random:
     raw = "|".join(str(p) for p in parts)
     seed = int(hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12], 16)
     return random.Random(seed)
+
+
+def _sorted_unique_videos(candidates: Sequence[Dict], clip_order_mode: str) -> List[str]:
+    """Distinct source videos in the fixed order clips should be drawn from, or [] for scored/auto selection."""
+    if clip_order_mode not in ("chronological", "name"):
+        return []
+    videos: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        video_file = str(candidate.get("video_file") or "")
+        if video_file and video_file not in seen:
+            seen.add(video_file)
+            videos.append(video_file)
+    if clip_order_mode == "name":
+        videos.sort(key=lambda v: os.path.basename(v).lower())
+    else:
+        def _mtime(v: str) -> float:
+            try:
+                return os.path.getmtime(v)
+            except OSError:
+                return float("inf")
+        videos.sort(key=_mtime)
+    return videos
 
 
 def _buffered_start_bounds(video_duration: float, source_duration: float, edge_buffer_seconds: float) -> tuple[float, float]:
@@ -47,6 +73,7 @@ def build_planned_clip_sequence(
     strict_unique_non_overlap: bool = True,
     preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 5.0,
+    clip_order_mode: str = "auto",
 ) -> List[Dict]:
     """Build exact source clip choices for every output segment.
 
@@ -55,6 +82,10 @@ def build_planned_clip_sequence(
 
     edge_buffer_seconds: portion at the very start/end of each source video that
     is never used for a clip (e.g. to skip intros/outros or unstable footage).
+    clip_order_mode: "auto" (editorial scoring, default), "chronological"
+    (source videos consumed in file-modified-time order), or "name" (consumed
+    in alphabetical filename order). In the non-auto modes, clips are drawn from
+    one source video at a time, in the given order, before moving to the next.
     """
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
     beat_info = beat_info or {}
@@ -78,34 +109,40 @@ def build_planned_clip_sequence(
     used_candidate_ids: set[str] = set()
     occupied_ranges: Dict[str, List[tuple[float, float]]] = {}
     planned: List[Dict] = []
+    video_order = _sorted_unique_videos(candidates, clip_order_mode)
+    active_video_idx = [0]
 
     for i, profile in enumerate(profiles):
-        if strict_unique_non_overlap:
-            planned_clip = _choose_and_materialize_candidate(
+        planned_clip = None
+        if video_order:
+            planned_clip = _select_ordered_segment(
                 candidates=candidates,
                 profile=profile,
                 recent_ids=recent_ids,
                 recent_videos=recent_videos,
                 usage=usage,
                 index=i,
+                strict_unique_non_overlap=strict_unique_non_overlap,
                 used_candidate_ids=used_candidate_ids,
                 occupied_ranges=occupied_ranges,
                 preferred_videos=preferred_set,
                 edge_buffer_seconds=edge_buffer_seconds,
+                video_order=video_order,
+                active_idx=active_video_idx,
             )
-        else:
-            candidate = _choose_relaxed_candidate(
+        if planned_clip is None:
+            planned_clip = _choose_for_segment(
                 candidates=candidates,
                 profile=profile,
                 recent_ids=recent_ids,
                 recent_videos=recent_videos,
                 usage=usage,
                 index=i,
+                strict_unique_non_overlap=strict_unique_non_overlap,
+                used_candidate_ids=used_candidate_ids,
+                occupied_ranges=occupied_ranges,
                 preferred_videos=preferred_set,
-            )
-            planned_clip = (
-                _materialize_clip(candidate, profile, i, edge_buffer_seconds=edge_buffer_seconds)
-                if candidate else None
+                edge_buffer_seconds=edge_buffer_seconds,
             )
 
         if not planned_clip:
@@ -217,6 +254,85 @@ def _target_for_segment(section: Dict, wave: float, impact: float, rhythm: float
     if wave >= 0.58 and rhythm >= 0.54:
         return "rhythm"
     return "flow"
+
+
+def _choose_for_segment(
+    candidates: Sequence[Dict],
+    profile: Dict,
+    recent_ids: deque,
+    recent_videos: deque,
+    usage: Counter,
+    index: int,
+    strict_unique_non_overlap: bool,
+    used_candidate_ids: set[str],
+    occupied_ranges: Dict[str, List[tuple[float, float]]],
+    preferred_videos: set[str],
+    edge_buffer_seconds: float,
+) -> Dict | None:
+    if strict_unique_non_overlap:
+        return _choose_and_materialize_candidate(
+            candidates=candidates,
+            profile=profile,
+            recent_ids=recent_ids,
+            recent_videos=recent_videos,
+            usage=usage,
+            index=index,
+            used_candidate_ids=used_candidate_ids,
+            occupied_ranges=occupied_ranges,
+            preferred_videos=preferred_videos,
+            edge_buffer_seconds=edge_buffer_seconds,
+        )
+    candidate = _choose_relaxed_candidate(
+        candidates=candidates,
+        profile=profile,
+        recent_ids=recent_ids,
+        recent_videos=recent_videos,
+        usage=usage,
+        index=index,
+        preferred_videos=preferred_videos,
+    )
+    return (
+        _materialize_clip(candidate, profile, index, edge_buffer_seconds=edge_buffer_seconds)
+        if candidate else None
+    )
+
+
+def _select_ordered_segment(
+    candidates: Sequence[Dict],
+    profile: Dict,
+    recent_ids: deque,
+    recent_videos: deque,
+    usage: Counter,
+    index: int,
+    strict_unique_non_overlap: bool,
+    used_candidate_ids: set[str],
+    occupied_ranges: Dict[str, List[tuple[float, float]]],
+    preferred_videos: set[str],
+    edge_buffer_seconds: float,
+    video_order: List[str],
+    active_idx: List[int],
+) -> Dict | None:
+    """Fill the current segment from the active source video, advancing to the next one when exhausted."""
+    while active_idx[0] < len(video_order):
+        current_video = video_order[active_idx[0]]
+        pool = [c for c in candidates if str(c.get("video_file") or "") == current_video]
+        clip = _choose_for_segment(
+            candidates=pool,
+            profile=profile,
+            recent_ids=recent_ids,
+            recent_videos=recent_videos,
+            usage=usage,
+            index=index,
+            strict_unique_non_overlap=strict_unique_non_overlap,
+            used_candidate_ids=used_candidate_ids,
+            occupied_ranges=occupied_ranges,
+            preferred_videos=preferred_videos,
+            edge_buffer_seconds=edge_buffer_seconds,
+        ) if pool else None
+        if clip:
+            return clip
+        active_idx[0] += 1
+    return None
 
 
 def _choose_and_materialize_candidate(
