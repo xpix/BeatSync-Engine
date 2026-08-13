@@ -409,7 +409,7 @@ def _build_non_overlapping_fallback_sequence(
     forced_map: Dict[int, str] = {}
     if first_video:
         forced_map[0] = str(first_video)
-    if last_video and segment_durations:
+    if last_video and len(segment_durations) > 0:
         forced_map[len(segment_durations) - 1] = str(last_video)  # wins over first_video for a single segment
 
     for i, raw_duration in enumerate(segment_durations):
@@ -504,7 +504,7 @@ def _build_legacy_random_fallback_sequence(
     forced_map: Dict[int, str] = {}
     if first_video:
         forced_map[0] = str(first_video)
-    if last_video and segment_durations:
+    if last_video and len(segment_durations) > 0:
         forced_map[len(segment_durations) - 1] = str(last_video)  # wins over first_video for a single segment
 
     planned: List[Dict] = []
