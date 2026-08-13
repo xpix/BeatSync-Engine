@@ -27,23 +27,44 @@ def _stable_rng(*parts) -> random.Random:
     return random.Random(seed)
 
 
+def _buffered_start_bounds(video_duration: float, source_duration: float, edge_buffer_seconds: float) -> tuple[float, float]:
+    """Valid [lo, hi] start-time range that keeps clips out of the video's edge buffer.
+
+    Shrinks gracefully (rather than rejecting the video) when it is too short to fit the buffer.
+    """
+    max_start_full = max(0.0, video_duration - source_duration)
+    buffer = max(0.0, edge_buffer_seconds)
+    lo = min(buffer, max_start_full)
+    hi = max(lo, max_start_full - buffer)
+    return lo, hi
+
+
 def build_planned_clip_sequence(
     cut_times: Sequence[float],
     segment_durations: Sequence[float],
     beat_info: Dict | None,
     video_files: Sequence[str],
+    strict_unique_non_overlap: bool = True,
+    preferred_videos: Sequence[str] = (),
+    edge_buffer_seconds: float = 5.0,
 ) -> List[Dict]:
     """Build exact source clip choices for every output segment.
 
     Returns an empty list when no visual library is present, which tells the
     renderer to keep its old fallback sampling.
+
+    edge_buffer_seconds: portion at the very start/end of each source video that
+    is never used for a clip (e.g. to skip intros/outros or unstable footage).
     """
+    edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
     beat_info = beat_info or {}
     video_analysis = beat_info.get("video_analysis") or {}
     candidates = list(video_analysis.get("candidates") or [])
     candidates = [c for c in candidates if c.get("video_file")]
     if not candidates:
         return []
+
+    preferred_set = {str(p) for p in preferred_videos if p}
 
     cut_times_arr = np.asarray(cut_times, dtype=float)
     durations_arr = np.asarray(segment_durations, dtype=float)
@@ -54,29 +75,58 @@ def build_planned_clip_sequence(
     recent_ids = deque(maxlen=10)
     recent_videos = deque(maxlen=5)
     usage = Counter()
+    used_candidate_ids: set[str] = set()
+    occupied_ranges: Dict[str, List[tuple[float, float]]] = {}
     planned: List[Dict] = []
 
     for i, profile in enumerate(profiles):
-        candidate = _choose_candidate(
-            candidates=candidates,
-            profile=profile,
-            recent_ids=recent_ids,
-            recent_videos=recent_videos,
-            usage=usage,
-            index=i,
-        )
-        if not candidate:
+        if strict_unique_non_overlap:
+            planned_clip = _choose_and_materialize_candidate(
+                candidates=candidates,
+                profile=profile,
+                recent_ids=recent_ids,
+                recent_videos=recent_videos,
+                usage=usage,
+                index=i,
+                used_candidate_ids=used_candidate_ids,
+                occupied_ranges=occupied_ranges,
+                preferred_videos=preferred_set,
+                edge_buffer_seconds=edge_buffer_seconds,
+            )
+        else:
+            candidate = _choose_relaxed_candidate(
+                candidates=candidates,
+                profile=profile,
+                recent_ids=recent_ids,
+                recent_videos=recent_videos,
+                usage=usage,
+                index=i,
+                preferred_videos=preferred_set,
+            )
+            planned_clip = (
+                _materialize_clip(candidate, profile, i, edge_buffer_seconds=edge_buffer_seconds)
+                if candidate else None
+            )
+
+        if not planned_clip:
             continue
-        planned_clip = _materialize_clip(
-            candidate=candidate,
-            profile=profile,
-            index=i,
-        )
+        candidate_id = str(planned_clip.get("candidate_id") or "")
+        video_file = str(planned_clip.get("video_file") or "")
+        start_time = float(planned_clip.get("start_time") or 0.0)
+        source_duration = max(0.05, float(planned_clip.get("source_duration") or 0.05))
+        end_time = start_time + source_duration
+
         planned.append(planned_clip)
-        recent_ids.append(candidate.get("id"))
-        recent_videos.append(candidate.get("video_file"))
-        usage[candidate.get("id")] += 1
-        usage[candidate.get("video_file")] += 1
+        if candidate_id:
+            if strict_unique_non_overlap:
+                used_candidate_ids.add(candidate_id)
+            recent_ids.append(candidate_id)
+            usage[candidate_id] += 1
+        if video_file:
+            recent_videos.append(video_file)
+            usage[video_file] += 1
+            if strict_unique_non_overlap:
+                occupied_ranges.setdefault(video_file, []).append((start_time, end_time))
 
     if len(planned) != len(durations_arr):
         return []
@@ -169,13 +219,170 @@ def _target_for_segment(section: Dict, wave: float, impact: float, rhythm: float
     return "flow"
 
 
-def _choose_candidate(
+def _choose_and_materialize_candidate(
     candidates: Sequence[Dict],
     profile: Dict,
     recent_ids: deque,
     recent_videos: deque,
     usage: Counter,
     index: int,
+    used_candidate_ids: set[str],
+    occupied_ranges: Dict[str, List[tuple[float, float]]],
+    preferred_videos: set[str] = frozenset(),
+    edge_buffer_seconds: float = 0.0,
+) -> Dict | None:
+    ranked: List[tuple[float, Dict]] = []
+    rng = _stable_rng(index, profile.get("target"), profile.get("start"))
+    required_source = max(0.05, float(profile.get("duration", 0.05)))
+
+    for candidate in candidates:
+        cid = str(candidate.get("id") or "")
+        if cid and cid in used_candidate_ids:
+            continue
+
+        score = _score_candidate(candidate, profile)
+        video_file = str(candidate.get("video_file") or "")
+        is_preferred = video_file in preferred_videos
+
+        if cid in recent_ids:
+            score -= 0.28
+        if video_file in recent_videos:
+            score -= 0.05 if is_preferred else 0.10
+        score -= min(0.28, usage[cid] * 0.10)
+        score -= min(0.18, usage[video_file] * (0.004 if is_preferred else 0.012))
+        if is_preferred:
+            score += 0.32
+
+        candidate_duration = max(0.05, float(candidate.get("duration", required_source)))
+        if candidate_duration < required_source * 0.55:
+            score -= 0.18
+
+        score += rng.random() * 0.015
+        ranked.append((score, candidate))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    for _, candidate in ranked:
+        start_time = _select_non_overlapping_start(candidate, profile, occupied_ranges, edge_buffer_seconds)
+        if start_time is None:
+            continue
+        return _materialize_clip(
+            candidate=candidate,
+            profile=profile,
+            index=index,
+            start_time=start_time,
+        )
+
+    return None
+
+
+def _select_non_overlapping_start(
+    candidate: Dict,
+    profile: Dict,
+    occupied_ranges: Dict[str, List[tuple[float, float]]],
+    edge_buffer_seconds: float = 0.0,
+) -> float | None:
+    source_duration = max(0.05, float(profile.get("duration", 0.05)))
+    start = float(candidate.get("start", 0.0))
+    end = float(candidate.get("end", start + source_duration))
+    window_start = max(0.0, min(start, end))
+    window_end = max(window_start, max(start, end))
+
+    video_duration = float(candidate.get("video_duration", window_end))
+    allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, edge_buffer_seconds)
+    window_start = max(window_start, allowed_lo)
+    window_end = min(window_end, allowed_hi + source_duration)
+
+    max_start = window_end - source_duration
+    if max_start < window_start:
+        return None
+
+    video_file = str(candidate.get("video_file") or "")
+    preferred = _preferred_start_in_window(candidate, profile, source_duration, window_start, max_start)
+    occupied = occupied_ranges.get(video_file, [])
+    return _pick_start_from_available_gaps(window_start, window_end, source_duration, occupied, preferred)
+
+
+def _preferred_start_in_window(
+    candidate: Dict,
+    profile: Dict,
+    source_duration: float,
+    window_start: float,
+    max_start: float,
+) -> float:
+    target = profile.get("target", "flow")
+    if target == "drop":
+        anchor = float(candidate.get("peak_time", candidate.get("center", candidate.get("start", 0.0))))
+        align = 0.36
+    elif target == "soft":
+        anchor = float(candidate.get("center", candidate.get("start", 0.0)))
+        align = 0.50
+    elif target == "build":
+        anchor = float(candidate.get("peak_time", candidate.get("center", candidate.get("start", 0.0))))
+        align = 0.48
+    else:
+        anchor = float(candidate.get("center", candidate.get("start", 0.0)))
+        align = 0.44
+
+    preferred = anchor - source_duration * align
+    return max(window_start, min(preferred, max_start))
+
+
+def _pick_start_from_available_gaps(
+    window_start: float,
+    window_end: float,
+    source_duration: float,
+    occupied: List[tuple[float, float]],
+    preferred_start: float,
+) -> float | None:
+    if window_end - window_start < source_duration:
+        return None
+
+    gaps: List[tuple[float, float]] = []
+    cursor = window_start
+    for occ_start, occ_end in sorted(occupied):
+        occ_start = float(occ_start)
+        occ_end = float(occ_end)
+        if occ_end <= cursor:
+            continue
+        if occ_start > cursor:
+            gap_start = cursor
+            gap_end = min(occ_start, window_end)
+            if gap_end - gap_start >= source_duration:
+                gaps.append((gap_start, gap_end))
+        cursor = max(cursor, occ_end)
+        if cursor >= window_end:
+            break
+
+    if cursor < window_end and window_end - cursor >= source_duration:
+        gaps.append((cursor, window_end))
+
+    if not gaps:
+        return None
+
+    best_start = None
+    best_distance = float("inf")
+    for gap_start, gap_end in gaps:
+        local_max_start = gap_end - source_duration
+        start = max(gap_start, min(preferred_start, local_max_start))
+        distance = abs(start - preferred_start)
+        if distance < best_distance:
+            best_distance = distance
+            best_start = start
+
+    return best_start
+
+
+def _choose_relaxed_candidate(
+    candidates: Sequence[Dict],
+    profile: Dict,
+    recent_ids: deque,
+    recent_videos: deque,
+    usage: Counter,
+    index: int,
+    preferred_videos: set[str] = frozenset(),
 ) -> Dict | None:
     best_candidate = None
     best_score = -999.0
@@ -183,17 +390,20 @@ def _choose_candidate(
 
     for candidate in candidates:
         score = _score_candidate(candidate, profile)
-        cid = candidate.get("id")
-        video_file = candidate.get("video_file")
+        cid = str(candidate.get("id") or "")
+        video_file = str(candidate.get("video_file") or "")
+        is_preferred = video_file in preferred_videos
 
         if cid in recent_ids:
             score -= 0.28
         if video_file in recent_videos:
-            score -= 0.10
+            score -= 0.05 if is_preferred else 0.10
         score -= min(0.28, usage[cid] * 0.10)
-        score -= min(0.18, usage[video_file] * 0.012)
+        score -= min(0.18, usage[video_file] * (0.004 if is_preferred else 0.012))
+        if is_preferred:
+            score += 0.32
 
-        required_source = max(0.05, profile["duration"])
+        required_source = max(0.05, float(profile.get("duration", 0.05)))
         candidate_duration = max(0.05, float(candidate.get("duration", required_source)))
         if candidate_duration < required_source * 0.55:
             score -= 0.18
@@ -252,27 +462,23 @@ def _score_candidate(candidate: Dict, profile: Dict) -> float:
     return _clamp(match + tag_bonus + 0.12 * quality - visibility_penalty, lo=-1.0, hi=2.0)
 
 
-def _materialize_clip(candidate: Dict, profile: Dict, index: int) -> Dict:
+def _materialize_clip(
+    candidate: Dict,
+    profile: Dict,
+    index: int,
+    start_time: float | None = None,
+    edge_buffer_seconds: float = 0.0,
+) -> Dict:
     final_duration = max(0.05, float(profile["duration"]))
     source_duration = final_duration
-    video_duration = max(source_duration, float(candidate.get("video_duration", source_duration)))
     target = profile.get("target", "flow")
 
-    if target == "drop":
-        anchor = float(candidate.get("peak_time", candidate.get("center", candidate.get("start", 0.0))))
-        align = 0.36
-    elif target == "soft":
+    if start_time is None:
+        video_duration = max(source_duration, float(candidate.get("video_duration", source_duration)))
+        allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, edge_buffer_seconds)
         anchor = float(candidate.get("center", candidate.get("start", 0.0)))
-        align = 0.50
-    elif target == "build":
-        anchor = float(candidate.get("peak_time", candidate.get("center", candidate.get("start", 0.0))))
-        align = 0.48
-    else:
-        anchor = float(candidate.get("center", candidate.get("start", 0.0)))
-        align = 0.44
-
-    start_time = anchor - source_duration * align
-    start_time = max(0.0, min(start_time, max(0.0, video_duration - source_duration)))
+        start_time = anchor - source_duration * 0.44
+        start_time = max(allowed_lo, min(start_time, allowed_hi))
 
     return {
         "index": index,

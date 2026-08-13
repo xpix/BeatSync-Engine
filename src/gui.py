@@ -73,6 +73,7 @@ import gradio as gr
 import tempfile
 import shutil
 import datetime
+import json
 import multiprocessing
 import queue
 import re
@@ -352,7 +353,9 @@ def _as_existing_source_paths(file_paths: VideoFilesInput) -> list[str]:
 
 def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        output_filename: str, processing_mode: str,
-                       custom_fps: float, session_state: dict,
+                       custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
+                       preferred_videos: VideoFilesInput | None = None,
+                       edge_buffer_seconds: float = 5.0,
                        progress_callback: Callable[[str], None] | None = None,
                        console_logger: StageConsoleLogger | None = None) -> StatusResult:
     total_started = time.perf_counter()
@@ -447,7 +450,10 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             local_audio_path, local_video_paths, selected_beats,
             output_file=temp_output, max_workers=parallel_workers,
             beat_info=beat_info, lossless_mode=is_prores,
-            use_gpu=use_gpu, gpu_encoder=gpu_encoder, fps=output_fps
+            use_gpu=use_gpu, gpu_encoder=gpu_encoder, fps=output_fps,
+            strict_unique_non_overlap=bool(strict_unique_non_overlap),
+            preferred_videos=_as_existing_source_paths(preferred_videos),
+            edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 5.0,
         )
 
         # Move to output folder
@@ -510,7 +516,9 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
 
 def process_video(audio_file: str, video_files: VideoFilesInput,
                  output_filename: str, processing_mode: str,
-                 custom_fps: float, session_state: dict) -> Iterator[StatusResult]:
+                 custom_fps: float, strict_unique_non_overlap: bool,
+                 session_state: dict, preferred_videos: VideoFilesInput | None = None,
+                 edge_buffer_seconds: float = 5.0) -> Iterator[StatusResult]:
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
     initial_status = _stage_status(1)
@@ -532,7 +540,10 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     output_filename=output_filename,
                     processing_mode=processing_mode,
                     custom_fps=custom_fps,
+                    strict_unique_non_overlap=bool(strict_unique_non_overlap),
                     session_state=session_state,
+                    preferred_videos=preferred_videos,
+                    edge_buffer_seconds=edge_buffer_seconds,
                     progress_callback=progress_callback,
                     console_logger=console_logger,
                 )
@@ -565,11 +576,11 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
 
 def cleanup_on_startup():
     """
-    Clean temporary runtime files on script start while preserving user inputs
-    and the persistent video analysis cache.
+    Clean temporary runtime files on script start while preserving user inputs,
+    the persistent video analysis cache, and previously uploaded files.
     """
     input_base = get_input_dir()
-    protected_dirs = {'audio', 'video', 'video_analysis_cache'}
+    protected_dirs = {'audio', 'video', 'video_analysis_cache', 'gradio_uploads'}
 
     try:
         os.makedirs(get_audio_input_dir(), exist_ok=True)
@@ -592,11 +603,73 @@ def cleanup_on_startup():
                 except Exception as e:
                     print(f"   ⚠️  Could not clean {item}: {e}")
 
-        # Recreate runtime temp upload folder after cleanup.
-        os.makedirs(os.path.join(input_base, 'gradio_uploads'), exist_ok=True)
-
     except Exception as e:
         print(f"   ⚠️  Warning during startup cleanup: {e}")
+
+
+def _get_upload_state_file() -> str:
+    return os.path.join(GRADIO_TEMP_DIR, '_last_upload_state.json')
+
+
+def _load_upload_state() -> dict:
+    state = {'audio': None, 'videos': [], 'preferred': []}
+    state_file = _get_upload_state_file()
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state.update(json.load(f))
+        except Exception:
+            pass
+    return state
+
+
+def _save_upload_state(state: dict) -> None:
+    try:
+        with open(_get_upload_state_file(), 'w', encoding='utf-8') as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"   ⚠️  Could not save upload state: {e}")
+
+
+def _video_choice_pairs(video_paths: list) -> list:
+    """(label, value) pairs for the preferred-videos checkbox group: basename shown, full path used."""
+    return [(os.path.basename(p), p) for p in (video_paths or [])]
+
+
+def _persist_audio_upload(audio_path: str | None) -> None:
+    state = _load_upload_state()
+    state['audio'] = audio_path
+    _save_upload_state(state)
+
+
+def _persist_video_upload(video_paths: list | None):
+    state = _load_upload_state()
+    video_paths = video_paths or []
+    state['videos'] = video_paths
+    surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
+    state['preferred'] = surviving_preferred
+    _save_upload_state(state)
+    return gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred)
+
+
+def _persist_preferred_videos(preferred_paths: list | None) -> None:
+    state = _load_upload_state()
+    state['preferred'] = preferred_paths or []
+    _save_upload_state(state)
+
+
+def _restore_uploads():
+    """Repopulate the file inputs from the last session, skipping files that no longer exist."""
+    state = _load_upload_state()
+    audio_path = None
+    saved_audio = state.get('audio')
+    if saved_audio and os.path.isfile(saved_audio):
+        audio_path = saved_audio
+
+    video_paths = [p for p in state.get('videos', []) if p and os.path.isfile(p)]
+    preferred_paths = [p for p in state.get('preferred', []) if p in video_paths]
+
+    return audio_path, (video_paths or None), gr.update(choices=_video_choice_pairs(video_paths), value=preferred_paths)
 
 
 def create_ui() -> gr.Blocks:
@@ -621,11 +694,22 @@ def create_ui() -> gr.Blocks:
             with gr.Column(scale=1):
                 gr.Markdown('### 📁 Input Files')
                 audio_input = gr.File(label=LABEL_AUDIO_FILE, file_types=['.mp3', '.wav', '.flac'], type='filepath', elem_id='audio-file-input')
-                video_input = gr.File(label=LABEL_VIDEO_FILES, file_count='multiple', file_types=['.mp4', '.mkv'], type='filepath', elem_id='video-files-input')
+                video_input = gr.File(label=LABEL_VIDEO_FILES, file_count='multiple', file_types=['.mp4', '.mkv', '.MP4', '.MKV', '.mov', '.MOV'], type='filepath', elem_id='video-files-input')
+                preferred_videos_input = gr.CheckboxGroup(
+                    label=LABEL_PREFERRED_VIDEOS,
+                    info=INFO_PREFERRED_VIDEOS,
+                    choices=[], value=[], elem_id='preferred-videos-input'
+                )
 
                 with gr.Group():
                     gr.Markdown('### ⚙️ Video Settings')
                     custom_fps = gr.Number(label=LABEL_CUSTOM_FPS, value=None, precision=2, info=INFO_CUSTOM_FPS)
+                    strict_mode = gr.Checkbox(
+                        value=True,
+                        label='Strict Clip Mode',
+                        info='Uses each selected source segment only once and prevents overlap inside the same source video.'
+                    )
+                    edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=5.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
 
                 with gr.Group():
                     gr.Markdown(f'### 🎬 Processing Mode')
@@ -649,12 +733,17 @@ def create_ui() -> gr.Blocks:
             fn=process_video,
             inputs=[
                 audio_input, video_input,
-                output_filename, processing_mode, custom_fps,
-                session_state
+                output_filename, processing_mode, custom_fps, strict_mode,
+                session_state, preferred_videos_input, edge_buffer_seconds
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'
         )
+
+        audio_input.change(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
+        video_input.change(fn=_persist_video_upload, inputs=[video_input], outputs=[preferred_videos_input])
+        preferred_videos_input.change(fn=_persist_preferred_videos, inputs=[preferred_videos_input], outputs=[])
+        app.load(fn=_restore_uploads, inputs=None, outputs=[audio_input, video_input, preferred_videos_input])
 
     return app
 

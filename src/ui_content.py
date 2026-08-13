@@ -322,9 +322,14 @@ def get_startup_header(cpu_count, max_threads, parallel_workers, python_status,
 
 LABEL_AUDIO_FILE = "🎵 Audio File (MP3/WAV/FLAC)"
 LABEL_VIDEO_FILES = "🎥 Video Files (MP4/MKV)"
+LABEL_PREFERRED_VIDEOS = "⭐ Bevorzugte Videos (mehr Clips daraus verwenden)"
+INFO_PREFERRED_VIDEOS = "Markierte Videos werden im fertigen Video bevorzugt und liefern mehr Clips."
 
 LABEL_CUSTOM_FPS = "🎞️ Custom FPS (Frame Rate)"
 INFO_CUSTOM_FPS = "Leave empty for auto-detect, or enter value (24/30/60)"
+
+LABEL_EDGE_BUFFER_SECONDS = "✂️ Rand-Puffer (Sekunden)"
+INFO_EDGE_BUFFER_SECONDS = "Anfang und Ende jedes Quellvideos werden um diese Anzahl Sekunden nicht für Clips verwendet."
 
 # GPU & Processing
 LABEL_GPU_STATUS = "⚡ GPU Acceleration Status"

@@ -14,7 +14,7 @@ setup_environment()
 import argparse
 import random
 import shutil
-from typing import TypeAlias, List, Dict, Tuple
+from typing import TypeAlias, List, Dict, Tuple, Sequence
 import numpy as np
 from pathlib import Path
 import gc
@@ -182,6 +182,12 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help='Output FPS (frames per second). If not specified, auto-detect from input video (default: auto)'
     )
+    parser.add_argument(
+        '--edge-buffer-seconds',
+        type=float,
+        default=5.0,
+        help='Seconds ignored at the start/end of each source video when picking clips (default: 5.0)'
+    )
 
     return parser.parse_args()
 
@@ -317,13 +323,140 @@ def create_clip_parallel(args):
         return (i, None, target_size, None, str(e), elapsed)
 
 
+def _build_non_overlapping_fallback_sequence(
+    segment_durations: Sequence[float],
+    video_files: Sequence[str],
+    preferred_videos: Sequence[str] = (),
+    edge_buffer_seconds: float = 5.0,
+) -> List[Dict]:
+    """Create a deterministic no-overlap plan when AV candidates are unavailable.
+
+    The planner places segments sequentially within each source file and rotates
+    across files, so selected source ranges are never reused or overlapped.
+    Preferred sources appear more often in the rotation so more clips are drawn
+    from them.
+    """
+    edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
+    preferred_set = {str(p) for p in preferred_videos if p}
+    sources: List[Dict[str, float | str]] = []
+    for video_file in video_files:
+        try:
+            duration = float(get_video_duration(video_file))
+        except Exception:
+            duration = 0.0
+        if duration > 0.06:
+            entry = {"video_file": video_file, "video_duration": duration}
+            sources.append(entry)
+            # Repeat preferred sources in the rotation order to bias more clips toward them.
+            if video_file in preferred_set:
+                sources.extend({"video_file": video_file, "video_duration": duration} for _ in range(3))
+
+    if not sources:
+        return []
+
+    cursors: Dict[str, float] = {}
+    for src in sources:
+        video_file = str(src["video_file"])
+        if video_file not in cursors:
+            cursors[video_file] = min(edge_buffer_seconds, float(src["video_duration"]))
+    planned: List[Dict] = []
+    next_source_index = 0
+
+    for i, raw_duration in enumerate(segment_durations):
+        required = max(0.05, float(raw_duration))
+        chosen = None
+        source_count = len(sources)
+
+        for step in range(source_count):
+            source_idx = (next_source_index + step) % source_count
+            source = sources[source_idx]
+            video_file = str(source["video_file"])
+            video_duration = float(source["video_duration"])
+            max_start_full = max(0.0, video_duration - required)
+            max_start = max(min(edge_buffer_seconds, max_start_full), max_start_full - edge_buffer_seconds)
+            cursor = max(0.0, float(cursors.get(video_file, 0.0)))
+            if cursor <= max_start + 1e-9:
+                start_time = min(cursor, max_start)
+                end_time = start_time + required
+                cursors[video_file] = end_time
+                next_source_index = (source_idx + 1) % source_count
+                chosen = {
+                    "index": i,
+                    "video_file": video_file,
+                    "source_name": os.path.basename(video_file),
+                    "start_time": start_time,
+                    "source_duration": required,
+                    "final_duration": required,
+                    "target": "flow",
+                    "score": 0.0,
+                    "candidate_id": f"fallback_{i:05d}_{source_idx:03d}",
+                    "tags": ["flow", "fallback"],
+                    "ai_analyzed": False,
+                }
+                break
+
+        if chosen is None:
+            return []
+
+        planned.append(chosen)
+
+    return planned
+
+
+def _build_legacy_random_fallback_sequence(
+    segment_durations: Sequence[float],
+    video_files: Sequence[str],
+    preferred_videos: Sequence[str] = (),
+    edge_buffer_seconds: float = 5.0,
+) -> List[Dict]:
+    """Legacy fallback: allow source reuse/overlap when strict mode is disabled."""
+    if not video_files:
+        return []
+
+    edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
+    preferred_set = {str(p) for p in preferred_videos if p}
+    weights = [4.0 if str(f) in preferred_set else 1.0 for f in video_files]
+
+    durations: Dict[str, float] = {}
+    for video_file in video_files:
+        try:
+            durations[str(video_file)] = float(get_video_duration(video_file))
+        except Exception:
+            durations[str(video_file)] = 0.0
+
+    planned: List[Dict] = []
+    for i, raw_duration in enumerate(segment_durations):
+        duration = max(0.05, float(raw_duration))
+        chosen_file = random.choices(list(video_files), weights=weights, k=1)[0]
+        video_duration = durations.get(str(chosen_file), 0.0)
+        max_start_full = max(0.0, video_duration - duration)
+        start_time = min(max(edge_buffer_seconds, 0.0), max_start_full)
+        planned.append({
+            "index": i,
+            "video_file": chosen_file,
+            "source_name": os.path.basename(chosen_file),
+            "start_time": start_time,
+            "source_duration": duration,
+            "final_duration": duration,
+            "target": "flow",
+            "score": 0.0,
+            "candidate_id": f"legacy_{i:05d}",
+            "tags": ["flow", "legacy_fallback"],
+            "ai_analyzed": False,
+        })
+    return planned
+
+
 def create_music_video(audio_file: str, video_files: VideoList, beat_times: BeatTimes,
                       output_file: str = 'output_music_video.mkv',
                       start_time: float = 0.0, end_time: float = None,
                       max_workers: int = None,
                       beat_info: dict = None,
                       lossless_mode: bool = False, use_gpu: bool = False, 
-                      gpu_encoder: str = 'h264_nvenc', fps: float = None) -> str:
+                      gpu_encoder: str = 'h264_nvenc', fps: float = None,
+                      strict_unique_non_overlap: bool = True,
+                      preferred_videos: Sequence[str] = (),
+                      edge_buffer_seconds: float = 5.0) -> str:
     """
     Creates a music video with video clips cut to detected beats.
     
@@ -346,6 +479,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         use_gpu: Use GPU acceleration
         gpu_encoder: GPU encoder to use
         fps: Output FPS
+        edge_buffer_seconds: Seconds ignored at the start/end of each source video
     
     Returns:
         Path to output video file
@@ -354,6 +488,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         raise ValueError("No beats were detected. Cannot create video.")
 
     video_creation_started = time.perf_counter()
+    edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
 
     if max_workers is None:
         max_workers = PARALLEL_WORKERS
@@ -452,7 +587,20 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         segment_durations=segment_durations,
         beat_info=beat_info,
         video_files=video_files,
+        strict_unique_non_overlap=strict_unique_non_overlap,
+        preferred_videos=preferred_videos,
+        edge_buffer_seconds=edge_buffer_seconds,
     )
+    if not planned_clip_sequence:
+        if strict_unique_non_overlap:
+            planned_clip_sequence = _build_non_overlapping_fallback_sequence(
+                segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds
+            )
+        else:
+            planned_clip_sequence = _build_legacy_random_fallback_sequence(
+                segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds
+            )
+
     if planned_clip_sequence:
         plan_summary = summarize_clip_plan(planned_clip_sequence)
         if beat_info is not None:
@@ -463,7 +611,12 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         print(f"   Targets: {plan_summary.get('targets', {})}")
         print(f"   AI-tagged source moments used: {plan_summary.get('ai_tagged', 0)}")
     else:
-        print("🎲 Visual planner fallback: source moments will use legacy random sampling")
+        if strict_unique_non_overlap:
+            raise RuntimeError(
+                "Not enough unique non-overlapping source material for the requested timeline. "
+                "Add more/longer source videos or reduce output duration."
+            )
+        raise RuntimeError("No source clip plan could be created.")
 
     # LOSSLESS MODE - ProRes workflow with FRAME-PERFECT precision
     if lossless_mode:
@@ -507,16 +660,13 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         for i, exact_duration in enumerate(segment_durations):
             # Duration comes from the absolute frame-locked timeline.
             frame_count = int(segment_frames[i])
-            planned_clip = planned_clip_sequence[i] if planned_clip_sequence else None
+            planned_clip = planned_clip_sequence[i]
 
-            if planned_clip:
-                source_video = os.path.abspath(planned_clip.get('video_file', ''))
-                prores_file = prores_map.get(source_video, random.choice(prores_files))
-                segment_start = float(planned_clip.get('start_time', 0.0))
-            else:
-                # Randomly select ProRes file
-                prores_file = random.choice(prores_files)
-                segment_start = None
+            source_video = os.path.abspath(planned_clip.get('video_file', ''))
+            prores_file = prores_map.get(source_video)
+            if not prores_file:
+                raise RuntimeError(f"Planned source video not available in ProRes map: {source_video}")
+            segment_start = float(planned_clip.get('start_time', 0.0))
 
             # Extract segment
             segment_file = extract_prores_segment_random(
@@ -608,8 +758,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         clip_args = []
         for i, final_duration in enumerate(segment_durations):
             # Duration comes from the absolute frame-locked cut timeline.
-            planned_clip = planned_clip_sequence[i] if planned_clip_sequence else None
-            video_file = planned_clip.get('video_file') if planned_clip else random.choice(video_files)
+            planned_clip = planned_clip_sequence[i]
+            video_file = planned_clip.get('video_file')
             clip_args.append((i, video_file, final_duration,
                             target_size, use_nvenc, gpu_encoder, session_temp_dir, fps,
                             planned_clip))
@@ -801,7 +951,9 @@ def main() -> None:
         lossless_mode=args.lossless,
         use_gpu=args.gpu,
         gpu_encoder=args.gpu_encoder,
-        fps=args.fps
+        fps=args.fps,
+        strict_unique_non_overlap=True,
+        edge_buffer_seconds=args.edge_buffer_seconds,
     )
  
     print(f'✅ Music video created successfully: {output_file}')
