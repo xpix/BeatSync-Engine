@@ -357,6 +357,8 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        preferred_videos: VideoFilesInput | None = None,
                        edge_buffer_seconds: float = 5.0,
                        clip_order_mode: str = 'auto',
+                       first_video: str | None = None,
+                       last_video: str | None = None,
                        progress_callback: Callable[[str], None] | None = None,
                        console_logger: StageConsoleLogger | None = None) -> StatusResult:
     total_started = time.perf_counter()
@@ -456,6 +458,8 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             preferred_videos=_as_existing_source_paths(preferred_videos),
             edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 5.0,
             clip_order_mode=clip_order_mode or 'auto',
+            first_video=_as_existing_source_path(first_video),
+            last_video=_as_existing_source_path(last_video),
         )
 
         # Move to output folder
@@ -521,7 +525,9 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                  custom_fps: float, strict_unique_non_overlap: bool,
                  session_state: dict, preferred_videos: VideoFilesInput | None = None,
                  edge_buffer_seconds: float = 5.0,
-                 clip_order_mode: str = 'auto') -> Iterator[StatusResult]:
+                 clip_order_mode: str = 'auto',
+                 first_video: str | None = None,
+                 last_video: str | None = None) -> Iterator[StatusResult]:
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
     initial_status = _stage_status(1)
@@ -548,6 +554,8 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     preferred_videos=preferred_videos,
                     edge_buffer_seconds=edge_buffer_seconds,
                     clip_order_mode=clip_order_mode,
+                    first_video=first_video,
+                    last_video=last_video,
                     progress_callback=progress_callback,
                     console_logger=console_logger,
                 )
@@ -616,7 +624,7 @@ def _get_upload_state_file() -> str:
 
 
 def _load_upload_state() -> dict:
-    state = {'audio': None, 'videos': [], 'preferred': []}
+    state = {'audio': None, 'videos': [], 'preferred': [], 'first_video': None, 'last_video': None}
     state_file = _get_upload_state_file()
     if os.path.exists(state_file):
         try:
@@ -640,6 +648,11 @@ def _video_choice_pairs(video_paths: list) -> list:
     return [(os.path.basename(p), p) for p in (video_paths or [])]
 
 
+def _video_choice_pairs_with_none(video_paths: list) -> list:
+    """Like _video_choice_pairs, with a leading "no selection" option for single-choice dropdowns."""
+    return [(NO_VIDEO_SELECTION_LABEL, '')] + _video_choice_pairs(video_paths)
+
+
 def _persist_audio_upload(audio_path: str | None) -> None:
     state = _load_upload_state()
     state['audio'] = audio_path
@@ -652,13 +665,33 @@ def _persist_video_upload(video_paths: list | None):
     state['videos'] = video_paths
     surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
     state['preferred'] = surviving_preferred
+    surviving_first = state.get('first_video') if state.get('first_video') in video_paths else None
+    surviving_last = state.get('last_video') if state.get('last_video') in video_paths else None
+    state['first_video'] = surviving_first
+    state['last_video'] = surviving_last
     _save_upload_state(state)
-    return gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred)
+    return (
+        gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_first or ''),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_last or ''),
+    )
 
 
 def _persist_preferred_videos(preferred_paths: list | None) -> None:
     state = _load_upload_state()
     state['preferred'] = preferred_paths or []
+    _save_upload_state(state)
+
+
+def _persist_first_video(path: str | None) -> None:
+    state = _load_upload_state()
+    state['first_video'] = path or None
+    _save_upload_state(state)
+
+
+def _persist_last_video(path: str | None) -> None:
+    state = _load_upload_state()
+    state['last_video'] = path or None
     _save_upload_state(state)
 
 
@@ -672,8 +705,15 @@ def _restore_uploads():
 
     video_paths = [p for p in state.get('videos', []) if p and os.path.isfile(p)]
     preferred_paths = [p for p in state.get('preferred', []) if p in video_paths]
+    first_video = state.get('first_video') if state.get('first_video') in video_paths else None
+    last_video = state.get('last_video') if state.get('last_video') in video_paths else None
 
-    return audio_path, (video_paths or None), gr.update(choices=_video_choice_pairs(video_paths), value=preferred_paths)
+    return (
+        audio_path, (video_paths or None),
+        gr.update(choices=_video_choice_pairs(video_paths), value=preferred_paths),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=first_video or ''),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=last_video or ''),
+    )
 
 
 def create_ui() -> gr.Blocks:
@@ -704,6 +744,15 @@ def create_ui() -> gr.Blocks:
                     info=INFO_PREFERRED_VIDEOS,
                     choices=[], value=[], elem_id='preferred-videos-input'
                 )
+                with gr.Row():
+                    first_video_input = gr.Dropdown(
+                        label=LABEL_FIRST_VIDEO, info=INFO_FIRST_VIDEO,
+                        choices=[(NO_VIDEO_SELECTION_LABEL, '')], value='', elem_id='first-video-input'
+                    )
+                    last_video_input = gr.Dropdown(
+                        label=LABEL_LAST_VIDEO, info=INFO_LAST_VIDEO,
+                        choices=[(NO_VIDEO_SELECTION_LABEL, '')], value='', elem_id='last-video-input'
+                    )
 
                 with gr.Group():
                     gr.Markdown('### ⚙️ Video Settings')
@@ -742,16 +791,25 @@ def create_ui() -> gr.Blocks:
             inputs=[
                 audio_input, video_input,
                 output_filename, processing_mode, custom_fps, strict_mode,
-                session_state, preferred_videos_input, edge_buffer_seconds, clip_order_mode
+                session_state, preferred_videos_input, edge_buffer_seconds, clip_order_mode,
+                first_video_input, last_video_input
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'
         )
 
         audio_input.change(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
-        video_input.change(fn=_persist_video_upload, inputs=[video_input], outputs=[preferred_videos_input])
+        video_input.change(
+            fn=_persist_video_upload, inputs=[video_input],
+            outputs=[preferred_videos_input, first_video_input, last_video_input]
+        )
         preferred_videos_input.change(fn=_persist_preferred_videos, inputs=[preferred_videos_input], outputs=[])
-        app.load(fn=_restore_uploads, inputs=None, outputs=[audio_input, video_input, preferred_videos_input])
+        first_video_input.change(fn=_persist_first_video, inputs=[first_video_input], outputs=[])
+        last_video_input.change(fn=_persist_last_video, inputs=[last_video_input], outputs=[])
+        app.load(
+            fn=_restore_uploads, inputs=None,
+            outputs=[audio_input, video_input, preferred_videos_input, first_video_input, last_video_input]
+        )
 
     return app
 

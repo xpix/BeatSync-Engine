@@ -196,6 +196,18 @@ def parse_arguments() -> argparse.Namespace:
         help='Order source videos appear in the output: auto (AI editorial selection), '
              'chronological (by file modified time), or name (alphabetical filename) (default: auto)'
     )
+    parser.add_argument(
+        '--first-video',
+        type=str,
+        default=None,
+        help='Source video file pinned to the very first output segment (default: none)'
+    )
+    parser.add_argument(
+        '--last-video',
+        type=str,
+        default=None,
+        help='Source video file pinned to the very last output segment (default: none)'
+    )
 
     return parser.parse_args()
 
@@ -352,6 +364,8 @@ def _build_non_overlapping_fallback_sequence(
     preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 5.0,
     clip_order_mode: str = "auto",
+    first_video: str | None = None,
+    last_video: str | None = None,
 ) -> List[Dict]:
     """Create a deterministic no-overlap plan when AV candidates are unavailable.
 
@@ -392,6 +406,11 @@ def _build_non_overlapping_fallback_sequence(
             cursors[video_file] = min(edge_buffer_seconds, float(src["video_duration"]))
     planned: List[Dict] = []
     next_source_index = 0
+    forced_map: Dict[int, str] = {}
+    if first_video:
+        forced_map[0] = str(first_video)
+    if last_video and segment_durations:
+        forced_map[len(segment_durations) - 1] = str(last_video)  # wins over first_video for a single segment
 
     for i, raw_duration in enumerate(segment_durations):
         required = max(0.05, float(raw_duration))
@@ -401,6 +420,10 @@ def _build_non_overlapping_fallback_sequence(
             candidate_indices = list(range(next_source_index, source_count))
         else:
             candidate_indices = [(next_source_index + step) % source_count for step in range(source_count)]
+        forced_video = forced_map.get(i)
+        if forced_video:
+            forced_indices = [idx for idx, s in enumerate(sources) if str(s["video_file"]) == forced_video]
+            candidate_indices = forced_indices + [idx for idx in candidate_indices if idx not in forced_indices]
 
         for source_idx in candidate_indices:
             source = sources[source_idx]
@@ -443,6 +466,8 @@ def _build_legacy_random_fallback_sequence(
     preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 5.0,
     clip_order_mode: str = "auto",
+    first_video: str | None = None,
+    last_video: str | None = None,
 ) -> List[Dict]:
     """Legacy fallback: allow source reuse/overlap when strict mode is disabled.
 
@@ -476,10 +501,32 @@ def _build_legacy_random_fallback_sequence(
             assignment.extend([video_file] * share)
         cursors: Dict[str, float] = {}
 
+    forced_map: Dict[int, str] = {}
+    if first_video:
+        forced_map[0] = str(first_video)
+    if last_video and segment_durations:
+        forced_map[len(segment_durations) - 1] = str(last_video)  # wins over first_video for a single segment
+
     planned: List[Dict] = []
     for i, raw_duration in enumerate(segment_durations):
         duration = max(0.05, float(raw_duration))
-        if sequential:
+        forced_video = forced_map.get(i)
+        if forced_video and forced_video in durations:
+            chosen_file = forced_video
+            video_duration = durations.get(str(chosen_file), 0.0)
+            max_start_full = max(0.0, video_duration - duration)
+            if sequential:
+                cursor = cursors.get(str(chosen_file), edge_buffer_seconds)
+                if max_start_full <= 0.0:
+                    start_time = 0.0
+                elif cursor > max_start_full + 1e-9:
+                    start_time = min(edge_buffer_seconds, max_start_full)
+                else:
+                    start_time = min(cursor, max_start_full)
+                cursors[str(chosen_file)] = start_time + duration
+            else:
+                start_time = min(max(edge_buffer_seconds, 0.0), max_start_full)
+        elif sequential:
             chosen_file = assignment[i]
             video_duration = durations.get(str(chosen_file), 0.0)
             max_start_full = max(0.0, video_duration - duration)
@@ -522,7 +569,9 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       strict_unique_non_overlap: bool = True,
                       preferred_videos: Sequence[str] = (),
                       edge_buffer_seconds: float = 5.0,
-                      clip_order_mode: str = "auto") -> str:
+                      clip_order_mode: str = "auto",
+                      first_video: str | None = None,
+                      last_video: str | None = None) -> str:
     """
     Creates a music video with video clips cut to detected beats.
     
@@ -549,6 +598,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         clip_order_mode: "auto" (editorial AI selection, default), "chronological"
             (source videos used in file-modified-time order), or "name" (used in
             alphabetical filename order)
+        first_video: source video pinned to the very first output segment
+        last_video: source video pinned to the very last output segment
     
     Returns:
         Path to output video file
@@ -660,17 +711,19 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         preferred_videos=preferred_videos,
         edge_buffer_seconds=edge_buffer_seconds,
         clip_order_mode=clip_order_mode,
+        first_video=first_video,
+        last_video=last_video,
     )
     if not planned_clip_sequence:
         if strict_unique_non_overlap:
             planned_clip_sequence = _build_non_overlapping_fallback_sequence(
                 segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
-                clip_order_mode=clip_order_mode,
+                clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
             )
         else:
             planned_clip_sequence = _build_legacy_random_fallback_sequence(
                 segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
-                clip_order_mode=clip_order_mode,
+                clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
             )
 
     if planned_clip_sequence:
@@ -1027,6 +1080,8 @@ def main() -> None:
         strict_unique_non_overlap=True,
         edge_buffer_seconds=args.edge_buffer_seconds,
         clip_order_mode=args.clip_order_mode,
+        first_video=args.first_video,
+        last_video=args.last_video,
     )
  
     print(f'✅ Music video created successfully: {output_file}')

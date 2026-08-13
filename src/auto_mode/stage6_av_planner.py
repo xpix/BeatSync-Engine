@@ -53,6 +53,18 @@ def _sorted_unique_videos(candidates: Sequence[Dict], clip_order_mode: str) -> L
     return videos
 
 
+def _forced_segment_videos(segment_count: int, first_video: str | None, last_video: str | None) -> Dict[int, str]:
+    """Map segment index -> source video that must be used there (start/end pinning)."""
+    forced: Dict[int, str] = {}
+    if segment_count <= 0:
+        return forced
+    if first_video:
+        forced[0] = str(first_video)
+    if last_video:
+        forced[segment_count - 1] = str(last_video)  # last_video wins when only one segment exists
+    return forced
+
+
 def _buffered_start_bounds(video_duration: float, source_duration: float, edge_buffer_seconds: float) -> tuple[float, float]:
     """Valid [lo, hi] start-time range that keeps clips out of the video's edge buffer.
 
@@ -74,6 +86,8 @@ def build_planned_clip_sequence(
     preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 5.0,
     clip_order_mode: str = "auto",
+    first_video: str | None = None,
+    last_video: str | None = None,
 ) -> List[Dict]:
     """Build exact source clip choices for every output segment.
 
@@ -86,6 +100,9 @@ def build_planned_clip_sequence(
     (source videos consumed in file-modified-time order), or "name" (consumed
     in alphabetical filename order). In the non-auto modes, clips are drawn from
     one source video at a time, in the given order, before moving to the next.
+    first_video/last_video: when given, pin the very first/last output segment
+    to a clip from that source video (falls back to normal selection if that
+    video has no usable candidate for the segment).
     """
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
     beat_info = beat_info or {}
@@ -111,10 +128,27 @@ def build_planned_clip_sequence(
     planned: List[Dict] = []
     video_order = _sorted_unique_videos(candidates, clip_order_mode)
     active_video_idx = [0]
+    forced_segment_videos = _forced_segment_videos(len(profiles), first_video, last_video)
 
     for i, profile in enumerate(profiles):
         planned_clip = None
-        if video_order:
+        forced_video = forced_segment_videos.get(i)
+        if forced_video:
+            pool = [c for c in candidates if str(c.get("video_file") or "") == forced_video]
+            planned_clip = _choose_for_segment(
+                candidates=pool,
+                profile=profile,
+                recent_ids=recent_ids,
+                recent_videos=recent_videos,
+                usage=usage,
+                index=i,
+                strict_unique_non_overlap=strict_unique_non_overlap,
+                used_candidate_ids=used_candidate_ids,
+                occupied_ranges=occupied_ranges,
+                preferred_videos=preferred_set,
+                edge_buffer_seconds=edge_buffer_seconds,
+            ) if pool else None
+        if planned_clip is None and video_order:
             planned_clip = _select_ordered_segment(
                 candidates=candidates,
                 profile=profile,

@@ -334,6 +334,12 @@ INFO_EDGE_BUFFER_SECONDS = "Anfang und Ende jedes Quellvideos werden um diese An
 LABEL_CLIP_ORDER_MODE = "🔀 Clip-Reihenfolge"
 INFO_CLIP_ORDER_MODE = "Legt fest, in welcher Reihenfolge die Quellvideos im fertigen Video verwendet werden."
 
+LABEL_FIRST_VIDEO = "⏮️ Start-Video"
+INFO_FIRST_VIDEO = "Dieses Video liefert den allerersten Clip im fertigen Video."
+LABEL_LAST_VIDEO = "⏭️ End-Video"
+INFO_LAST_VIDEO = "Dieses Video liefert den allerletzten Clip im fertigen Video."
+NO_VIDEO_SELECTION_LABEL = "(keine Auswahl)"
+
 # GPU & Processing
 LABEL_GPU_STATUS = "⚡ GPU Acceleration Status"
 
