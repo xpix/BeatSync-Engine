@@ -90,7 +90,7 @@ import socket
 from typing import Callable, Iterator, TypeAlias, Tuple, Dict, List
 
 # Import FFmpeg processing module
-from ffmpeg_processing import get_video_duration, get_video_fps, FFMPEG_PATH
+from ffmpeg_processing import get_video_duration, get_video_fps, get_video_resolution, FFMPEG_PATH
 
 # Shared runtime settings
 from gpu_cpu_utils import (
@@ -450,10 +450,15 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             fps_source = next((path for path in local_video_paths if not is_image_source(path)), local_video_paths[0])
             output_fps = get_video_fps(fps_source)
 
+        # Prefer real footage over a photo so a portrait picture can't set the whole canvas.
+        resolution_source = next((path for path in local_video_paths if not is_image_source(path)), local_video_paths[0])
+        target_resolution = get_video_resolution(resolution_source)
+
         audio_duration = get_video_duration(local_audio_path)
         image_source_dir = os.path.join(session_dir, 'image_sources')
         local_video_paths = prepare_visual_sources(
-            local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds
+            local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds,
+            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores,
         )
             
         # Prepare output paths
@@ -491,6 +496,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             clip_order_mode=clip_order_mode or 'auto',
             first_video=_as_existing_source_path(first_video),
             last_video=_as_existing_source_path(last_video),
+            target_resolution=target_resolution,
             start_text=start_text or '',
             start_text_position=start_text_position or 'bottom_center',
             start_text_duration=float(start_text_duration) if start_text_duration is not None else 3.0,
@@ -637,6 +643,40 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
     yield result_queue.get()
 
 
+def _cleanup_gradio_uploads() -> None:
+    """Drop stale Gradio upload-cache entries, keeping only the last remembered audio/video files."""
+    uploads_dir = GRADIO_TEMP_DIR
+    if not os.path.isdir(uploads_dir):
+        return
+
+    state = _load_upload_state()
+    keep_paths = {os.path.abspath(p) for p in [state.get('audio'), *(state.get('videos') or [])] if p}
+
+    for item in os.listdir(uploads_dir):
+        item_path = os.path.join(uploads_dir, item)
+        try:
+            if item == '_last_upload_state.json':
+                continue
+            if item == '_incoming':
+                # Keep the staging folder itself; only clear leftover partial-upload chunks.
+                for leftover in os.listdir(item_path):
+                    leftover_path = os.path.join(item_path, leftover)
+                    if os.path.isdir(leftover_path):
+                        shutil.rmtree(leftover_path, ignore_errors=True)
+                    else:
+                        os.remove(leftover_path)
+                continue
+            if item.startswith('beatsync_'):
+                shutil.rmtree(item_path, ignore_errors=True)
+                continue
+            if os.path.isdir(item_path):
+                cached_files = [os.path.join(item_path, f) for f in os.listdir(item_path)]
+                if not any(os.path.abspath(f) in keep_paths for f in cached_files):
+                    shutil.rmtree(item_path, ignore_errors=True)
+        except Exception as e:
+            print(f"   ⚠️  Could not clean gradio_uploads/{item}: {e}")
+
+
 def cleanup_on_startup():
     """
     Clean temporary runtime files on script start while preserving user inputs,
@@ -665,6 +705,8 @@ def cleanup_on_startup():
                         os.remove(item_path)
                 except Exception as e:
                     print(f"   ⚠️  Could not clean {item}: {e}")
+
+        _cleanup_gradio_uploads()
 
     except Exception as e:
         print(f"   ⚠️  Warning during startup cleanup: {e}")
@@ -901,6 +943,11 @@ def create_ui() -> gr.Blocks:
             outputs=[preferred_videos_input, first_video_input, last_video_input]
         )
         video_folder_input.submit(
+            fn=_persist_video_folder, inputs=[video_folder_input],
+            outputs=[preferred_videos_input, first_video_input, last_video_input]
+        )
+        # Also react on blur/paste (not just Enter) so the dropdowns populate reliably.
+        video_folder_input.change(
             fn=_persist_video_folder, inputs=[video_folder_input],
             outputs=[preferred_videos_input, first_video_input, last_video_input]
         )

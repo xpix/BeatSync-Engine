@@ -66,7 +66,9 @@ def is_image_source(file_path: str) -> bool:
 
 
 def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, fps: float,
-                           working_dir: str, edge_buffer_seconds: float = 5.0) -> List[str]:
+                           working_dir: str, edge_buffer_seconds: float = 5.0,
+                           use_nvenc: bool = False, gpu_encoder: str = 'h264_nvenc',
+                           lossless: bool = False) -> List[str]:
     """Convert still images into looped MP4 sources used by the normal video pipeline."""
     os.makedirs(working_dir, exist_ok=True)
     image_duration = max(0.1, float(audio_duration)) + (2.0 * max(0.0, float(edge_buffer_seconds))) + 1.0
@@ -77,7 +79,10 @@ def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, f
             continue
         output_file = os.path.join(working_dir, f"image_source_{index}_{uuid.uuid4().hex}.mp4")
         print(f"🖼️ Preparing still image source: {os.path.basename(source_file)}")
-        prepared_sources.append(create_looping_image_video(source_file, output_file, image_duration, fps))
+        prepared_sources.append(create_looping_image_video(
+            source_file, output_file, image_duration, fps,
+            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=lossless,
+        ))
     return prepared_sources
 
 
@@ -596,6 +601,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       clip_order_mode: str = "auto",
                       first_video: str | None = None,
                       last_video: str | None = None,
+                      target_resolution: Tuple[int, int] | None = None,
                       start_text: str = '',
                       start_text_position: str = 'bottom_center',
                       start_text_duration: float = 3.0,
@@ -624,6 +630,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         use_gpu: Use GPU acceleration
         gpu_encoder: GPU encoder to use
         fps: Output FPS
+        target_resolution: Output canvas size; if omitted, falls back to the first source's resolution
         edge_buffer_seconds: Seconds ignored at the start/end of each source video
         clip_order_mode: "auto" (editorial AI selection, default), "chronological"
             (source videos used in file-modified-time order), or "name" (used in
@@ -900,8 +907,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
     
     # STANDARD MODE - Direct parallel processing (NO BATCHES)
     else:
-        # Get target resolution from first video
-        target_size = get_video_resolution(video_files[0])
+        # Falls back to the first file only when the caller didn't already pick a real (non-photo) source.
+        target_size = target_resolution or get_video_resolution(video_files[0])
         render_info["target_resolution"] = f"{target_size[0]}x{target_size[1]}"
         print(f"🎞️ Target resolution: {target_size[0]}x{target_size[1]}")
         
@@ -1084,14 +1091,18 @@ def main() -> None:
     print(f'✓ Found {len(video_files)} video/image files')
 
     fps_for_images = args.fps or get_video_fps(next((path for path in video_files if not is_image_source(path)), video_files[0]))
+    # Prefer real footage over a photo so a portrait picture can't set the whole canvas.
+    target_resolution = get_video_resolution(next((path for path in video_files if not is_image_source(path)), video_files[0]))
     audio_duration = get_video_duration(args.mp3_file)
     if args.end_time and args.end_time > args.start_time:
         audio_duration = args.end_time - args.start_time
     elif args.start_time > 0:
         audio_duration -= args.start_time
     image_source_dir = tempfile.mkdtemp(prefix='beatsync_image_sources_')
+    use_nvenc_for_images = args.gpu and NVENC_AVAILABLE and not args.lossless and args.gpu_encoder != 'none'
     video_files = prepare_visual_sources(
-        video_files, audio_duration, fps_for_images, image_source_dir, args.edge_buffer_seconds
+        video_files, audio_duration, fps_for_images, image_source_dir, args.edge_buffer_seconds,
+        use_nvenc=use_nvenc_for_images, gpu_encoder=args.gpu_encoder, lossless=args.lossless,
     )
  
     print(f"🤖 Using AUTO mode")
@@ -1134,6 +1145,7 @@ def main() -> None:
         clip_order_mode=args.clip_order_mode,
         first_video=args.first_video,
         last_video=args.last_video,
+        target_resolution=target_resolution,
     )
  
     print(f'✅ Music video created successfully: {output_file}')

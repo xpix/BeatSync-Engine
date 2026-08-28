@@ -220,7 +220,8 @@ def get_video_resolution(video_file: str) -> Tuple[int, int]:
 
 
 def create_looping_image_video(image_file: str, output_file: str, duration: float,
-                               fps: float) -> str:
+                               fps: float, use_nvenc: bool = False,
+                               gpu_encoder: str = 'h264_nvenc', lossless: bool = False) -> str:
     """Turn a still image into a silent CFR MP4 source for the render pipeline."""
     duration = max(0.1, float(duration))
     fps = max(1.0, float(fps))
@@ -230,15 +231,22 @@ def create_looping_image_video(image_file: str, output_file: str, duration: floa
         '-i', image_file,
         '-vf', f"scale=trunc(iw/2)*2:trunc(ih/2)*2,fps={fps}",
         '-t', f'{duration:.6f}',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '0',
-        '-pix_fmt', 'yuv420p',
+    ]
+    if lossless:
+        # Exact reproduction is required before the ProRes conversion step.
+        cmd.extend(['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'stillimage', '-crf', '0', '-pix_fmt', 'yuv420p'])
+    elif use_nvenc:
+        cmd.extend(get_nvenc_quality_args(gpu_encoder, include_pix_fmt=True))
+    else:
+        # This intermediate gets re-encoded again during clip extraction, so lossy is fine and much faster.
+        cmd.extend(['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'stillimage', '-crf', '16', '-pix_fmt', 'yuv420p'])
+    cmd.extend([
         '-an',
         '-fps_mode', 'cfr',
+        '-threads', str(MAX_THREADS),
         '-y',
         output_file,
-    ]
+    ])
     result = _run_media_command(cmd, timeout=180)
     if result.returncode != 0 or not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
         raise RuntimeError(
