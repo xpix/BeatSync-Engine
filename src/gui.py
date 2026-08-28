@@ -458,7 +458,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         image_source_dir = os.path.join(session_dir, 'image_sources')
         local_video_paths = prepare_visual_sources(
             local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds,
-            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores,
+            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores, target_size=target_resolution,
         )
             
         # Prepare output paths

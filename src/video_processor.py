@@ -68,7 +68,7 @@ def is_image_source(file_path: str) -> bool:
 def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, fps: float,
                            working_dir: str, edge_buffer_seconds: float = 5.0,
                            use_nvenc: bool = False, gpu_encoder: str = 'h264_nvenc',
-                           lossless: bool = False) -> List[str]:
+                           lossless: bool = False, target_size: Tuple[int, int] | None = None) -> List[str]:
     """Convert still images into looped MP4 sources used by the normal video pipeline."""
     os.makedirs(working_dir, exist_ok=True)
     image_duration = max(0.1, float(audio_duration)) + (2.0 * max(0.0, float(edge_buffer_seconds))) + 1.0
@@ -81,7 +81,7 @@ def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, f
         print(f"🖼️ Preparing still image source: {os.path.basename(source_file)}")
         prepared_sources.append(create_looping_image_video(
             source_file, output_file, image_duration, fps,
-            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=lossless,
+            use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=lossless, target_size=target_size,
         ))
     return prepared_sources
 
@@ -1103,6 +1103,7 @@ def main() -> None:
     video_files = prepare_visual_sources(
         video_files, audio_duration, fps_for_images, image_source_dir, args.edge_buffer_seconds,
         use_nvenc=use_nvenc_for_images, gpu_encoder=args.gpu_encoder, lossless=args.lossless,
+        target_size=target_resolution,
     )
  
     print(f"🤖 Using AUTO mode")

@@ -221,15 +221,19 @@ def get_video_resolution(video_file: str) -> Tuple[int, int]:
 
 def create_looping_image_video(image_file: str, output_file: str, duration: float,
                                fps: float, use_nvenc: bool = False,
-                               gpu_encoder: str = 'h264_nvenc', lossless: bool = False) -> str:
+                               gpu_encoder: str = 'h264_nvenc', lossless: bool = False,
+                               target_size: Tuple[int, int] | None = None) -> str:
     """Turn a still image into a silent CFR MP4 source for the render pipeline."""
     duration = max(0.1, float(duration))
     fps = max(1.0, float(fps))
+    # Scale to the final output size now (not the native photo resolution) so we don't
+    # push multi-megapixel frames through the filter/encoder for the whole song length.
+    scale_filter = f"scale={target_size[0]}:{target_size[1]}" if target_size else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     cmd = [
         FFMPEG_PATH,
         '-loop', '1',
         '-i', image_file,
-        '-vf', f"scale=trunc(iw/2)*2:trunc(ih/2)*2,fps={fps}",
+        '-vf', f"{scale_filter},fps={fps}",
         '-t', f'{duration:.6f}',
     ]
     if lossless:
