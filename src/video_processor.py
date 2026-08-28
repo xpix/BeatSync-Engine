@@ -45,6 +45,7 @@ from ffmpeg_processing import (
     extract_clip_segment_ffmpeg,
     extract_prores_segment_random,
     concatenate_videos_ffmpeg,
+    add_text_overlays_ffmpeg,
     seconds_to_frame_count,
     frame_count_to_seconds,
 )
@@ -594,7 +595,13 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       edge_buffer_seconds: float = 5.0,
                       clip_order_mode: str = "auto",
                       first_video: str | None = None,
-                      last_video: str | None = None) -> str:
+                      last_video: str | None = None,
+                      start_text: str = '',
+                      start_text_position: str = 'bottom_center',
+                      start_text_duration: float = 3.0,
+                      end_text: str = '',
+                      end_text_position: str = 'bottom_center',
+                      end_text_duration: float = 3.0) -> str:
     """
     Creates a music video with video clips cut to detected beats.
     
@@ -623,6 +630,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
             alphabetical filename order)
         first_video: source video pinned to the very first output segment
         last_video: source video pinned to the very last output segment
+        start_text/end_text: optional titles burned into the start/end of the output
     
     Returns:
         Path to output video file
@@ -883,6 +891,11 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         
         print(f"✓ Cleanup complete")
         
+        output_file = add_text_overlays_ffmpeg(
+            output_file, start_text=start_text, start_position=start_text_position,
+            start_duration=start_text_duration, end_text=end_text, end_position=end_text_position,
+            end_duration=end_text_duration, use_nvenc=False, fps=fps,
+        )
         return output_file
     
     # STANDARD MODE - Direct parallel processing (NO BATCHES)
@@ -1022,6 +1035,11 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         print(f"   Total video creation time: {_fmt_seconds(time.perf_counter() - video_creation_started)}")
         print(f"{'='*60}\n")
         
+        output_file = add_text_overlays_ffmpeg(
+            output_file, start_text=start_text, start_position=start_text_position,
+            start_duration=start_text_duration, end_text=end_text, end_position=end_text_position,
+            end_duration=end_text_duration, use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, fps=fps,
+        )
         return output_file
  
  
