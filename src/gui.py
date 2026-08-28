@@ -65,9 +65,15 @@ from logger import (
     setup_environment,
     USING_PORTABLE_PYTHON, USING_PORTABLE_CUDA, USING_CUPY_CTK, FFMPEG_FOUND
 )
+from paths import GRADIO_TEMP_DIR
 
 # Initialize environment
 setup_environment()
+# Gradio reads this setting during import. Keeping incoming upload files on the
+# same volume as its cache avoids an expensive cross-volume copy for large videos.
+GRADIO_UPLOAD_STAGING_DIR = os.path.join(GRADIO_TEMP_DIR, '_incoming')
+os.makedirs(GRADIO_UPLOAD_STAGING_DIR, exist_ok=True)
+os.environ['GRADIO_TEMP_DIR'] = GRADIO_TEMP_DIR
 # NOW import other modules (after CUDA environment is set)
 import gradio as gr
 import tempfile
@@ -84,7 +90,7 @@ import socket
 from typing import Callable, Iterator, TypeAlias, Tuple, Dict, List
 
 # Import FFmpeg processing module
-from ffmpeg_processing import get_video_fps, FFMPEG_PATH
+from ffmpeg_processing import get_video_duration, get_video_fps, FFMPEG_PATH
 
 # Shared runtime settings
 from gpu_cpu_utils import (
@@ -97,7 +103,6 @@ from gpu_cpu_utils import (
     set_gpu_mode,
 )
 from paths import (
-    GRADIO_TEMP_DIR,
     get_input_dir,
     get_audio_input_dir,
     get_video_input_dir,
@@ -107,15 +112,16 @@ from paths import (
 gpu_data = GPU_INFO
 gpu_info = f"{gpu_data['name']} ({gpu_data['cuda_version']})" if gpu_data['available'] else "CPU Mode"
 
-from video_processor import create_music_video
+from video_processor import create_music_video, is_image_source, prepare_visual_sources, get_video_files
 
 from auto_mode import analyze_beats_auto
 
 # Import UI content
 from ui_content import *
 
-# Set environment variable for Gradio
-os.environ['GRADIO_TEMP_DIR'] = GRADIO_TEMP_DIR
+# Gradio's multipart parser uses tempfile.NamedTemporaryFile for upload chunks.
+# Use the project-local staging directory so the final cache move is atomic.
+tempfile.tempdir = GRADIO_UPLOAD_STAGING_DIR
 
 VideoFilesInput : TypeAlias = List[str]
 StatusResult : TypeAlias = Tuple[str, str, Dict]
@@ -354,11 +360,18 @@ def _as_existing_source_paths(file_paths: VideoFilesInput) -> list[str]:
 def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        output_filename: str, processing_mode: str,
                        custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
+                       video_folder_path: str = '',
                        preferred_videos: VideoFilesInput | None = None,
                        edge_buffer_seconds: float = 5.0,
                        clip_order_mode: str = 'auto',
                        first_video: str | None = None,
                        last_video: str | None = None,
+                       start_text: str = '',
+                       start_text_position: str = 'bottom_center',
+                       start_text_duration: float = 3.0,
+                       end_text: str = '',
+                       end_text_position: str = 'bottom_center',
+                       end_text_duration: float = 3.0,
                        progress_callback: Callable[[str], None] | None = None,
                        console_logger: StageConsoleLogger | None = None) -> StatusResult:
     total_started = time.perf_counter()
@@ -387,8 +400,19 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         else:
             return None, '❌ Error: No audio file selected', session_state
 
+        # A local folder path skips the browser upload entirely for large video files.
+        video_folder_path = (video_folder_path or '').strip()
+        if video_folder_path:
+            if not os.path.isdir(video_folder_path):
+                return None, f'❌ Error: Video folder not found: {video_folder_path}', session_state
+            try:
+                local_video_paths = get_video_files(video_folder_path)
+            except ValueError as e:
+                return None, f'❌ Error: {e}', session_state
+            session_state['local_video_paths'] = local_video_paths
+            session_state['original_video_paths'] = None
         # Handle videos by referencing selected file paths directly.
-        if video_files:
+        elif video_files:
             if video_files != session_state.get('original_video_paths'):
                 local_video_paths = _as_existing_source_paths(video_files)
                 if local_video_paths:
@@ -423,7 +447,14 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         if custom_fps is not None and custom_fps > 0:
             output_fps = custom_fps
         else:
-            output_fps = get_video_fps(local_video_paths[0])
+            fps_source = next((path for path in local_video_paths if not is_image_source(path)), local_video_paths[0])
+            output_fps = get_video_fps(fps_source)
+
+        audio_duration = get_video_duration(local_audio_path)
+        image_source_dir = os.path.join(session_dir, 'image_sources')
+        local_video_paths = prepare_visual_sources(
+            local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds
+        )
             
         # Prepare output paths
         output_folder = get_output_dir()
@@ -460,6 +491,12 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             clip_order_mode=clip_order_mode or 'auto',
             first_video=_as_existing_source_path(first_video),
             last_video=_as_existing_source_path(last_video),
+            start_text=start_text or '',
+            start_text_position=start_text_position or 'bottom_center',
+            start_text_duration=float(start_text_duration) if start_text_duration is not None else 3.0,
+            end_text=end_text or '',
+            end_text_position=end_text_position or 'bottom_center',
+            end_text_duration=float(end_text_duration) if end_text_duration is not None else 3.0,
         )
 
         # Move to output folder
@@ -523,11 +560,18 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
 def process_video(audio_file: str, video_files: VideoFilesInput,
                  output_filename: str, processing_mode: str,
                  custom_fps: float, strict_unique_non_overlap: bool,
-                 session_state: dict, preferred_videos: VideoFilesInput | None = None,
+                 session_state: dict, video_folder_path: str = '',
+                 preferred_videos: VideoFilesInput | None = None,
                  edge_buffer_seconds: float = 5.0,
                  clip_order_mode: str = 'auto',
                  first_video: str | None = None,
-                 last_video: str | None = None) -> Iterator[StatusResult]:
+                 last_video: str | None = None,
+                 start_text: str = '',
+                 start_text_position: str = 'bottom_center',
+                 start_text_duration: float = 3.0,
+                 end_text: str = '',
+                 end_text_position: str = 'bottom_center',
+                 end_text_duration: float = 3.0) -> Iterator[StatusResult]:
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
     initial_status = _stage_status(1)
@@ -551,11 +595,18 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     custom_fps=custom_fps,
                     strict_unique_non_overlap=bool(strict_unique_non_overlap),
                     session_state=session_state,
+                    video_folder_path=video_folder_path,
                     preferred_videos=preferred_videos,
                     edge_buffer_seconds=edge_buffer_seconds,
                     clip_order_mode=clip_order_mode,
                     first_video=first_video,
                     last_video=last_video,
+                    start_text=start_text,
+                    start_text_position=start_text_position,
+                    start_text_duration=start_text_duration,
+                    end_text=end_text,
+                    end_text_position=end_text_position,
+                    end_text_duration=end_text_duration,
                     progress_callback=progress_callback,
                     console_logger=console_logger,
                 )
@@ -624,7 +675,7 @@ def _get_upload_state_file() -> str:
 
 
 def _load_upload_state() -> dict:
-    state = {'audio': None, 'videos': [], 'preferred': [], 'first_video': None, 'last_video': None}
+    state = {'audio': None, 'videos': [], 'video_folder': None, 'preferred': [], 'first_video': None, 'last_video': None}
     state_file = _get_upload_state_file()
     if os.path.exists(state_file):
         try:
@@ -653,6 +704,16 @@ def _video_choice_pairs_with_none(video_paths: list) -> list:
     return [(NO_VIDEO_SELECTION_LABEL, '')] + _video_choice_pairs(video_paths)
 
 
+def _scan_video_folder(folder_path: str) -> list:
+    """Video/image files found in a local folder, or [] if missing/empty."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    try:
+        return get_video_files(folder_path)
+    except ValueError:
+        return []
+
+
 def _persist_audio_upload(audio_path: str | None) -> None:
     state = _load_upload_state()
     state['audio'] = audio_path
@@ -663,6 +724,25 @@ def _persist_video_upload(video_paths: list | None):
     state = _load_upload_state()
     video_paths = video_paths or []
     state['videos'] = video_paths
+    surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
+    state['preferred'] = surviving_preferred
+    surviving_first = state.get('first_video') if state.get('first_video') in video_paths else None
+    surviving_last = state.get('last_video') if state.get('last_video') in video_paths else None
+    state['first_video'] = surviving_first
+    state['last_video'] = surviving_last
+    _save_upload_state(state)
+    return (
+        gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_first or ''),
+        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_last or ''),
+    )
+
+
+def _persist_video_folder(folder_path: str | None):
+    folder_path = (folder_path or '').strip()
+    state = _load_upload_state()
+    state['video_folder'] = folder_path or None
+    video_paths = _scan_video_folder(folder_path) if folder_path else (state.get('videos') or [])
     surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
     state['preferred'] = surviving_preferred
     surviving_first = state.get('first_video') if state.get('first_video') in video_paths else None
@@ -703,13 +783,14 @@ def _restore_uploads():
     if saved_audio and os.path.isfile(saved_audio):
         audio_path = saved_audio
 
-    video_paths = [p for p in state.get('videos', []) if p and os.path.isfile(p)]
+    video_folder = state.get('video_folder') or ''
+    video_paths = _scan_video_folder(video_folder) or [p for p in state.get('videos', []) if p and os.path.isfile(p)]
     preferred_paths = [p for p in state.get('preferred', []) if p in video_paths]
     first_video = state.get('first_video') if state.get('first_video') in video_paths else None
     last_video = state.get('last_video') if state.get('last_video') in video_paths else None
 
     return (
-        audio_path, (video_paths or None),
+        audio_path, (video_paths or None), video_folder,
         gr.update(choices=_video_choice_pairs(video_paths), value=preferred_paths),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=first_video or ''),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=last_video or ''),
@@ -738,7 +819,11 @@ def create_ui() -> gr.Blocks:
             with gr.Column(scale=1):
                 gr.Markdown('### 📁 Input Files')
                 audio_input = gr.File(label=LABEL_AUDIO_FILE, file_types=['.mp3', '.wav', '.flac'], type='filepath', elem_id='audio-file-input')
-                video_input = gr.File(label=LABEL_VIDEO_FILES, file_count='multiple', file_types=['.mp4', '.mkv', '.MP4', '.MKV', '.mov', '.MOV'], type='filepath', elem_id='video-files-input')
+                video_input = gr.File(label=LABEL_VIDEO_FILES, file_count='multiple', file_types=['.mp4', '.mkv', '.mov', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.heic', '.heif'], type='filepath', elem_id='video-files-input')
+                video_folder_input = gr.Textbox(
+                    label=LABEL_VIDEO_FOLDER, info=INFO_VIDEO_FOLDER,
+                    placeholder=r'z.B. D:\Videos\Rohmaterial', elem_id='video-folder-input'
+                )
                 preferred_videos_input = gr.CheckboxGroup(
                     label=LABEL_PREFERRED_VIDEOS,
                     info=INFO_PREFERRED_VIDEOS,
@@ -767,6 +852,16 @@ def create_ui() -> gr.Blocks:
                         choices=[('🤖 Automatisch (KI-Auswahl)', 'auto'), ('📅 Chronologisch (Aufnahmedatum)', 'chronological'), ('🔤 Alphabetisch (Dateiname)', 'name')],
                         value='auto', label=LABEL_CLIP_ORDER_MODE, info=INFO_CLIP_ORDER_MODE
                     )
+                    with gr.Group():
+                        gr.Markdown('#### 📝 Text-Einblendungen')
+                        start_text = gr.Textbox(label=LABEL_START_TEXT, info=INFO_START_TEXT)
+                        with gr.Row():
+                            start_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
+                            start_text_duration = gr.Number(value=3.0, minimum=0.1, precision=1, label=LABEL_TEXT_DURATION)
+                        end_text = gr.Textbox(label=LABEL_END_TEXT, info=INFO_END_TEXT)
+                        with gr.Row():
+                            end_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
+                            end_text_duration = gr.Number(value=3.0, minimum=0.1, precision=1, label=LABEL_TEXT_DURATION)
 
                 with gr.Group():
                     gr.Markdown(f'### 🎬 Processing Mode')
@@ -791,8 +886,10 @@ def create_ui() -> gr.Blocks:
             inputs=[
                 audio_input, video_input,
                 output_filename, processing_mode, custom_fps, strict_mode,
-                session_state, preferred_videos_input, edge_buffer_seconds, clip_order_mode,
-                first_video_input, last_video_input
+                session_state, video_folder_input, preferred_videos_input, edge_buffer_seconds, clip_order_mode,
+                first_video_input, last_video_input,
+                start_text, start_text_position, start_text_duration,
+                end_text, end_text_position, end_text_duration,
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'
@@ -803,12 +900,16 @@ def create_ui() -> gr.Blocks:
             fn=_persist_video_upload, inputs=[video_input],
             outputs=[preferred_videos_input, first_video_input, last_video_input]
         )
+        video_folder_input.submit(
+            fn=_persist_video_folder, inputs=[video_folder_input],
+            outputs=[preferred_videos_input, first_video_input, last_video_input]
+        )
         preferred_videos_input.change(fn=_persist_preferred_videos, inputs=[preferred_videos_input], outputs=[])
         first_video_input.change(fn=_persist_first_video, inputs=[first_video_input], outputs=[])
         last_video_input.change(fn=_persist_last_video, inputs=[last_video_input], outputs=[])
         app.load(
             fn=_restore_uploads, inputs=None,
-            outputs=[audio_input, video_input, preferred_videos_input, first_video_input, last_video_input]
+            outputs=[audio_input, video_input, video_folder_input, preferred_videos_input, first_video_input, last_video_input]
         )
 
     return app

@@ -321,7 +321,9 @@ def get_startup_header(cpu_count, max_threads, parallel_workers, python_status,
 # ============================================================================
 
 LABEL_AUDIO_FILE = "🎵 Audio File (MP3/WAV/FLAC)"
-LABEL_VIDEO_FILES = "🎥 Video Files (MP4/MKV)"
+LABEL_VIDEO_FILES = "🎥 Video & Image Files (MP4/MKV/JPG/HEIC)"
+LABEL_VIDEO_FOLDER = "📂 Oder: Lokaler Videoordner (Upload überspringen)"
+INFO_VIDEO_FOLDER = "Pfad zu einem Ordner mit Videos/Bildern auf diesem PC. Umgeht den Browser-Upload und ist bei großen Dateien deutlich schneller. Hat Vorrang vor hochgeladenen Dateien."
 LABEL_PREFERRED_VIDEOS = "⭐ Bevorzugte Videos (mehr Clips daraus verwenden)"
 INFO_PREFERRED_VIDEOS = "Markierte Videos werden im fertigen Video bevorzugt und liefern mehr Clips."
 
@@ -339,6 +341,18 @@ INFO_FIRST_VIDEO = "Dieses Video liefert den allerersten Clip im fertigen Video.
 LABEL_LAST_VIDEO = "⏭️ End-Video"
 INFO_LAST_VIDEO = "Dieses Video liefert den allerletzten Clip im fertigen Video."
 NO_VIDEO_SELECTION_LABEL = "(keine Auswahl)"
+
+LABEL_START_TEXT = "📝 Start-Text"
+LABEL_END_TEXT = "📝 End-Text"
+LABEL_TEXT_POSITION = "Position"
+LABEL_TEXT_DURATION = "Dauer (Sekunden)"
+INFO_START_TEXT = "Wird am Anfang des Zielvideos eingeblendet. Leer lassen, um keine Einblendung zu verwenden."
+INFO_END_TEXT = "Wird am Ende des Zielvideos eingeblendet. Leer lassen, um keine Einblendung zu verwenden."
+TEXT_POSITION_CHOICES = [
+    ('Oben links', 'top_left'), ('Oben Mitte', 'top_center'), ('Oben rechts', 'top_right'),
+    ('Mitte links', 'middle_left'), ('Zentriert', 'middle_center'), ('Mitte rechts', 'middle_right'),
+    ('Unten links', 'bottom_left'), ('Unten Mitte', 'bottom_center'), ('Unten rechts', 'bottom_right'),
+]
 
 # GPU & Processing
 LABEL_GPU_STATUS = "⚡ GPU Acceleration Status"

@@ -14,6 +14,7 @@ setup_environment()
 import argparse
 import random
 import shutil
+import tempfile
 from typing import TypeAlias, List, Dict, Tuple, Sequence
 import numpy as np
 from pathlib import Path
@@ -39,6 +40,7 @@ from ffmpeg_processing import (
     get_video_duration,
     get_video_fps,
     get_video_resolution,
+    create_looping_image_video,
     convert_to_prores_proxy,
     extract_clip_segment_ffmpeg,
     extract_prores_segment_random,
@@ -55,6 +57,27 @@ warnings.filterwarnings('ignore', message='.*bytes wanted but 0 bytes read.*')
 
 BeatTimes : TypeAlias = np.ndarray
 VideoList : TypeAlias = List[str]
+IMAGE_EXTENSIONS = {'.bmp', '.heic', '.heif', '.jpeg', '.jpg', '.png', '.webp'}
+
+
+def is_image_source(file_path: str) -> bool:
+    return Path(file_path).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, fps: float,
+                           working_dir: str, edge_buffer_seconds: float = 5.0) -> List[str]:
+    """Convert still images into looped MP4 sources used by the normal video pipeline."""
+    os.makedirs(working_dir, exist_ok=True)
+    image_duration = max(0.1, float(audio_duration)) + (2.0 * max(0.0, float(edge_buffer_seconds))) + 1.0
+    prepared_sources: List[str] = []
+    for index, source_file in enumerate(source_files):
+        if not is_image_source(source_file):
+            prepared_sources.append(source_file)
+            continue
+        output_file = os.path.join(working_dir, f"image_source_{index}_{uuid.uuid4().hex}.mp4")
+        print(f"🖼️ Preparing still image source: {os.path.basename(source_file)}")
+        prepared_sources.append(create_looping_image_video(source_file, output_file, image_duration, fps))
+    return prepared_sources
 
 
 def _fmt_seconds(seconds: float) -> str:
@@ -213,14 +236,14 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def get_video_files(directory : str) -> VideoList:
-    video_extensions = ['.mp4', '.MP4', '.mkv', '.MKV']
+    video_extensions = ['.mp4', '.MP4', '.mkv', '.MKV', '.mov', '.MOV', '.jpg', '.JPG', '.jpeg', '.JPEG', '.png', '.PNG', '.webp', '.WEBP', '.bmp', '.BMP', '.heic', '.HEIC', '.heif', '.HEIF']
     video_files = []
 
     for ext in video_extensions:
         video_files.extend(Path(directory).glob(f'*{ext}'))
 
     if not video_files:
-        raise ValueError(f'No MP4/MKV files found in {directory}')
+        raise ValueError(f'No video or image files found in {directory}')
 
     return [str(f) for f in video_files]
 
@@ -1040,7 +1063,18 @@ def main() -> None:
     
     print(f'📁 Audio file: {args.mp3_file}')
     video_files = get_video_files(args.video_directory)
-    print(f'✓ Found {len(video_files)} video files')
+    print(f'✓ Found {len(video_files)} video/image files')
+
+    fps_for_images = args.fps or get_video_fps(next((path for path in video_files if not is_image_source(path)), video_files[0]))
+    audio_duration = get_video_duration(args.mp3_file)
+    if args.end_time and args.end_time > args.start_time:
+        audio_duration = args.end_time - args.start_time
+    elif args.start_time > 0:
+        audio_duration -= args.start_time
+    image_source_dir = tempfile.mkdtemp(prefix='beatsync_image_sources_')
+    video_files = prepare_visual_sources(
+        video_files, audio_duration, fps_for_images, image_source_dir, args.edge_buffer_seconds
+    )
  
     print(f"🤖 Using AUTO mode")
     selected_beats, beat_info = analyze_beats_auto(

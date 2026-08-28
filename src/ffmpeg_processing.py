@@ -219,6 +219,35 @@ def get_video_resolution(video_file: str) -> Tuple[int, int]:
         return (1920, 1080)  # Default fallback
 
 
+def create_looping_image_video(image_file: str, output_file: str, duration: float,
+                               fps: float) -> str:
+    """Turn a still image into a silent CFR MP4 source for the render pipeline."""
+    duration = max(0.1, float(duration))
+    fps = max(1.0, float(fps))
+    cmd = [
+        FFMPEG_PATH,
+        '-loop', '1',
+        '-i', image_file,
+        '-vf', f"scale=trunc(iw/2)*2:trunc(ih/2)*2,fps={fps}",
+        '-t', f'{duration:.6f}',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '0',
+        '-pix_fmt', 'yuv420p',
+        '-an',
+        '-fps_mode', 'cfr',
+        '-y',
+        output_file,
+    ]
+    result = _run_media_command(cmd, timeout=180)
+    if result.returncode != 0 or not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+        raise RuntimeError(
+            f"Could not create video source from image {os.path.basename(image_file)}: "
+            f"{_short_ffmpeg_error(result.stderr)}"
+        )
+    return output_file
+
+
 def seconds_to_frame_count(seconds: float, fps: float) -> int:
     """
     Convert seconds to exact frame count.
@@ -233,6 +262,80 @@ def frame_count_to_seconds(frames: int, fps: float) -> float:
     This is the EXACT duration for the frame count.
     """
     return frames / fps
+
+
+_TEXT_POSITIONS = {
+    'top_left': ('40', '40'),
+    'top_center': ('(w-text_w)/2', '40'),
+    'top_right': ('w-text_w-40', '40'),
+    'middle_left': ('40', '(h-text_h)/2'),
+    'middle_center': ('(w-text_w)/2', '(h-text_h)/2'),
+    'middle_right': ('w-text_w-40', '(h-text_h)/2'),
+    'bottom_left': ('40', 'h-text_h-40'),
+    'bottom_center': ('(w-text_w)/2', 'h-text_h-40'),
+    'bottom_right': ('w-text_w-40', 'h-text_h-40'),
+}
+
+
+def _escape_drawtext_value(text: str) -> str:
+    """Escape user text for FFmpeg's drawtext filter."""
+    return str(text).replace('\\', r'\\').replace("'", r"\'").replace(':', r'\:').replace(',', r'\,').replace('\n', r'\n')
+
+
+def add_text_overlays_ffmpeg(output_file: str, start_text: str = '',
+                              start_position: str = 'bottom_center', start_duration: float = 3.0,
+                              end_text: str = '', end_position: str = 'bottom_center',
+                              end_duration: float = 3.0, use_nvenc: bool = False,
+                              gpu_encoder: str = 'h264_nvenc', fps: float = 30.0) -> str:
+    """Burn optional start/end titles into an already assembled output video."""
+    if not str(start_text or '').strip() and not str(end_text or '').strip():
+        return output_file
+
+    overlays = []
+    video_duration = get_video_duration(output_file)
+
+    def add_overlay(text: str, position: str, visible_from: float, visible_to: float) -> None:
+        text = str(text or '').strip()
+        if not text or visible_to <= visible_from:
+            return
+        x, y = _TEXT_POSITIONS.get(position, _TEXT_POSITIONS['bottom_center'])
+        escaped_text = _escape_drawtext_value(text)
+        overlays.append(
+            "drawtext=fontfile='C\\:/Windows/Fonts/arial.ttf':"
+            f"text='{escaped_text}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:"
+            f"x={x}:y={y}:enable='between(t,{visible_from:.3f},{visible_to:.3f})':expansion=none"
+        )
+
+    start_duration = max(0.0, float(start_duration or 0.0))
+    end_duration = max(0.0, float(end_duration or 0.0))
+    add_overlay(start_text, start_position, 0.0, min(start_duration, video_duration))
+    add_overlay(end_text, end_position, max(0.0, video_duration - end_duration), video_duration)
+    if not overlays:
+        return output_file
+
+    base, extension = os.path.splitext(output_file)
+    temp_output = f"{base}_text_overlay_{uuid.uuid4().hex}{extension}"
+    print(f"   📝 Adding {len(overlays)} text overlay(s)...")
+    cmd = [
+        FFMPEG_PATH, '-nostdin', '-hide_banner', '-i', output_file,
+        '-map', '0:v:0', '-map', '0:a?', '-vf', ','.join(overlays),
+    ]
+    if output_file.lower().endswith('.mov'):
+        cmd.extend(['-c:v', 'prores', '-profile:v', '0', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le'])
+    elif use_nvenc:
+        cmd.extend(get_nvenc_quality_args(gpu_encoder, include_pix_fmt=True))
+    else:
+        cmd.extend(get_cpu_h264_quality_args(include_pix_fmt=True))
+    cmd.extend(['-c:a', 'copy', '-fps_mode', 'cfr', '-r', str(fps), '-movflags', '+faststart', '-y', temp_output])
+
+    try:
+        result = _run_media_command(cmd, timeout=600)
+        if result.returncode != 0:
+            raise RuntimeError(f"Text overlay failed: {_short_ffmpeg_error(result.stderr)}")
+        os.replace(temp_output, output_file)
+        return output_file
+    finally:
+        _safe_remove_file(temp_output)
 
 
 def convert_to_prores_proxy(video_file: str, output_dir: str, fps: float = None) -> str:

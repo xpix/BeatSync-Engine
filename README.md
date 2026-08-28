@@ -124,7 +124,7 @@ BeatSync Engine/
 6.  Upload:
 
     *   one audio file: `.mp3`, `.wav`, or `.flac`;
-    *   one or more source videos: `.mp4` or `.mkv`.
+    *   one or more source videos or still images: `.mp4`, `.mkv`, `.mov`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`, `.heic`, or `.heif`. Images are looped as video sources and can be cut to the music like clips. HEIC/HEIF support depends on the bundled FFmpeg build.
 
 7.  Choose a processing mode.
 
