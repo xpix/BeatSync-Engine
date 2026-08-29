@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Sequence
 
 import cv2
 import numpy as np
@@ -275,6 +275,7 @@ def analyze_video_sources(
     use_gpu: bool = False,
     enable_ai: bool = True,
     qwen_model_path: str | None = None,
+    debug_callback: Callable[[str], None] | None = None,
 ) -> Dict:
     """Analyze all source videos and return candidate moments for Auto Mode."""
     total_started = time.perf_counter()
@@ -309,6 +310,8 @@ def analyze_video_sources(
         if cached:
             cache_hits += 1
             print(f"   Reusing cached visual analysis {idx}/{len(existing)}: {_safe_name(video_file)}")
+            if debug_callback:
+                debug_callback(f"Cached: {_safe_name(video_file)} ({idx}/{len(existing)})")
             results_by_index[idx] = cached
         else:
             jobs.append({"index": idx, "video_file": video_file, "cache_file": cache_file})
@@ -332,6 +335,7 @@ def analyze_video_sources(
                         True,
                         job["index"],
                         len(existing),
+                        debug_callback,
                     ): job
                     for job in jobs
                 }
@@ -354,6 +358,7 @@ def analyze_video_sources(
                             True,
                             job["index"],
                             len(existing),
+                            debug_callback,
                         )
         else:
             print("   CPU visual analysis workers: 1 (serial)")
@@ -367,6 +372,7 @@ def analyze_video_sources(
                     False,
                     job["index"],
                     len(existing),
+                    debug_callback,
                 )
 
     # When the deterministic CPU-heavy pass ran in parallel, run Qwen after it in
@@ -397,6 +403,7 @@ def analyze_video_sources(
                 qwen_model_path=qwen_model_path,
                 audio_profile=audio_profile or {},
                 label=f"{idx}/{len(existing)}",
+                debug_callback=debug_callback,
             )
 
     for job in jobs:
@@ -478,12 +485,15 @@ def _analyze_single_video(
     defer_ai: bool = False,
     index: int | None = None,
     total: int | None = None,
+    debug_callback: Callable[[str], None] | None = None,
 ) -> Dict:
     started = time.perf_counter()
     timings: Dict[str, float] = {}
     name = _safe_name(video_file)
     prefix = f"{index}/{total} " if index and total else ""
     print(f"   Analyzing video {prefix}{name}")
+    if debug_callback:
+        debug_callback(f"Analyzing: {name} ({prefix.strip() or '1/1'})")
 
     step_started = time.perf_counter()
     duration = max(0.0, float(get_video_duration(video_file)))
@@ -608,6 +618,7 @@ def _complete_deferred_qwen(
     qwen_model_path: str,
     audio_profile: Dict,
     label: str = "",
+    debug_callback: Callable[[str], None] | None = None,
 ) -> Dict:
     candidates = video_data.get("candidates") or []
     if not candidates:
@@ -617,6 +628,8 @@ def _complete_deferred_qwen(
 
     name = _safe_name(video_data.get("video_file", video_data.get("source_name", "video")))
     print(f"   Running deferred Qwen semantic analysis {label}: {name}")
+    if debug_callback:
+        debug_callback(f"Qwen tagging: {name} ({label})")
     started = time.perf_counter()
     qwen_info = {}
     try:

@@ -229,10 +229,19 @@ def create_looping_image_video(image_file: str, output_file: str, duration: floa
     # Scale to the final output size now (not the native photo resolution) so we don't
     # push multi-megapixel frames through the filter/encoder for the whole song length.
     scale_filter = f"scale={target_size[0]}:{target_size[1]}" if target_size else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
+    # HEIC/WebP/etc. can be very expensive to re-decode on every looped frame with
+    # some FFmpeg builds. Decode the source once to a plain PNG and loop that instead.
+    decoded_frame = os.path.join(os.path.dirname(output_file) or ".", f"_decoded_{uuid.uuid4().hex}.png")
+    decode_result = _run_media_command(
+        [FFMPEG_PATH, '-y', '-i', image_file, '-frames:v', '1', decoded_frame], timeout=60
+    )
+    loop_source = decoded_frame if decode_result.returncode == 0 and os.path.exists(decoded_frame) else image_file
+
     cmd = [
         FFMPEG_PATH,
         '-loop', '1',
-        '-i', image_file,
+        '-i', loop_source,
         '-vf', f"{scale_filter},fps={fps}",
         '-t', f'{duration:.6f}',
     ]
@@ -251,13 +260,16 @@ def create_looping_image_video(image_file: str, output_file: str, duration: floa
         '-y',
         output_file,
     ])
-    result = _run_media_command(cmd, timeout=180)
-    if result.returncode != 0 or not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-        raise RuntimeError(
-            f"Could not create video source from image {os.path.basename(image_file)}: "
-            f"{_short_ffmpeg_error(result.stderr)}"
-        )
-    return output_file
+    try:
+        result = _run_media_command(cmd, timeout=180)
+        if result.returncode != 0 or not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise RuntimeError(
+                f"Could not create video source from image {os.path.basename(image_file)}: "
+                f"{_short_ffmpeg_error(result.stderr)}"
+            )
+        return output_file
+    finally:
+        _safe_remove_file(decoded_frame)
 
 
 def seconds_to_frame_count(seconds: float, fps: float) -> int:

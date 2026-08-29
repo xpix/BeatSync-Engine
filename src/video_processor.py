@@ -12,10 +12,11 @@ setup_environment()
 
 # NOW import other modules (after CUDA and Python environment is set)
 import argparse
+import hashlib
 import random
 import shutil
 import tempfile
-from typing import TypeAlias, List, Dict, Tuple, Sequence
+from typing import TypeAlias, List, Dict, Tuple, Sequence, Callable
 import numpy as np
 from pathlib import Path
 import gc
@@ -33,6 +34,7 @@ from gpu_cpu_utils import (
 )
 from paths import (
     get_processing_dir,
+    get_image_loop_cache_dir,
 )
 
 # Import FFmpeg processing module
@@ -65,24 +67,83 @@ def is_image_source(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in IMAGE_EXTENSIONS
 
 
+def is_image_loop_video(file_path: str) -> bool:
+    """True for the synthetic per-image loop videos created by prepare_visual_sources()."""
+    return os.path.basename(str(file_path)).startswith("image_source_")
+
+
+# Bump when create_looping_image_video()'s output would change for the same inputs,
+# so stale cache entries from a previous version get regenerated instead of reused.
+IMAGE_LOOP_CACHE_VERSION = "v1"
+
+
+def _image_loop_cache_key(source_file: str, duration: float, fps: float,
+                          target_size: Tuple[int, int] | None, lossless: bool,
+                          use_nvenc: bool, gpu_encoder: str) -> str:
+    try:
+        stat = os.stat(source_file)
+        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+    except OSError:
+        stamp = "unknown"
+    parts = [
+        IMAGE_LOOP_CACHE_VERSION,
+        os.path.abspath(source_file),
+        stamp,
+        f"{duration:.2f}",
+        f"{fps:.3f}",
+        f"{target_size[0]}x{target_size[1]}" if target_size else "native",
+        "lossless" if lossless else (f"nvenc_{gpu_encoder}" if use_nvenc else "cpu"),
+    ]
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+
 def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, fps: float,
                            working_dir: str, edge_buffer_seconds: float = 5.0,
                            use_nvenc: bool = False, gpu_encoder: str = 'h264_nvenc',
-                           lossless: bool = False, target_size: Tuple[int, int] | None = None) -> List[str]:
-    """Convert still images into looped MP4 sources used by the normal video pipeline."""
+                           lossless: bool = False, target_size: Tuple[int, int] | None = None,
+                           debug_callback: Callable[[str], None] | None = None) -> List[str]:
+    """Convert still images into looped MP4 sources used by the normal video pipeline.
+
+    Results are cached persistently (keyed on source content + generation settings), so a
+    restart reuses a previously generated loop instead of re-encoding it from scratch.
+    """
     os.makedirs(working_dir, exist_ok=True)
-    image_duration = max(0.1, float(audio_duration)) + (2.0 * max(0.0, float(edge_buffer_seconds))) + 1.0
+    cache_dir = get_image_loop_cache_dir()
+    os.makedirs(cache_dir, exist_ok=True)
+    # Every frame of a photo loop is identical, so a short loop looks the same as a
+    # song-length one; just keep it long enough for the edge-buffer math to stay valid.
+    image_duration = max(5.0, (2.0 * max(0.0, float(edge_buffer_seconds))) + 2.0)
     prepared_sources: List[str] = []
     for index, source_file in enumerate(source_files):
         if not is_image_source(source_file):
             prepared_sources.append(source_file)
             continue
-        output_file = os.path.join(working_dir, f"image_source_{index}_{uuid.uuid4().hex}.mp4")
+        cache_key = _image_loop_cache_key(
+            source_file, image_duration, fps, target_size, lossless, use_nvenc, gpu_encoder
+        )
+        cached_file = os.path.join(cache_dir, f"image_source_{cache_key}.mp4")
+        if os.path.exists(cached_file) and os.path.getsize(cached_file) > 0:
+            print(f"🖼️ Reusing cached image video: {os.path.basename(source_file)}")
+            if debug_callback:
+                debug_callback(f"Cached image: {os.path.basename(source_file)} ({index + 1}/{len(source_files)})")
+            prepared_sources.append(cached_file)
+            continue
         print(f"🖼️ Preparing still image source: {os.path.basename(source_file)}")
+        if debug_callback:
+            debug_callback(f"Preparing image: {os.path.basename(source_file)} ({index + 1}/{len(source_files)})")
+        image_started = time.perf_counter()
         prepared_sources.append(create_looping_image_video(
-            source_file, output_file, image_duration, fps,
+            source_file, cached_file, image_duration, fps,
             use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=lossless, target_size=target_size,
         ))
+        if debug_callback:
+            debug_callback(f"Image ready: {os.path.basename(source_file)} in {_fmt_seconds(time.perf_counter() - image_started)}")
+    image_count = sum(1 for f in source_files if is_image_source(f))
+    summary = f"Visual sources ready: {len(source_files) - image_count} video(s), {image_count} image(s) converted to loops"
+    print(f"🖼️ {summary}")
+    if debug_callback:
+        debug_callback(summary)
     return prepared_sources
 
 
@@ -243,15 +304,23 @@ def parse_arguments() -> argparse.Namespace:
 
 def get_video_files(directory : str) -> VideoList:
     video_extensions = ['.mp4', '.MP4', '.mkv', '.MKV', '.mov', '.MOV', '.jpg', '.JPG', '.jpeg', '.JPEG', '.png', '.PNG', '.webp', '.WEBP', '.bmp', '.BMP', '.heic', '.HEIC', '.heif', '.HEIF']
-    video_files = []
+    seen: set = set()
+    video_files: List[str] = []
 
     for ext in video_extensions:
-        video_files.extend(Path(directory).glob(f'*{ext}'))
+        for path in Path(directory).glob(f'*{ext}'):
+            # On case-insensitive filesystems (Windows), '*.mp4' and '*.MP4' both
+            # match the same files; normcase+dedupe stops them being counted twice.
+            key = os.path.normcase(os.path.abspath(str(path)))
+            if key in seen:
+                continue
+            seen.add(key)
+            video_files.append(str(path))
 
     if not video_files:
         raise ValueError(f'No video or image files found in {directory}')
 
-    return [str(f) for f in video_files]
+    return video_files
 
 
 def _sort_video_files(video_files: Sequence[str], clip_order_mode: str) -> List[str]:
@@ -330,7 +399,11 @@ def create_clip_parallel(args):
     """
     clip_started = time.perf_counter()
     planned_clip = None
-    if len(args) >= 9:
+    debug_callback = None
+    if len(args) >= 10:
+        (i, video_file, final_duration, target_size,
+         use_nvenc, gpu_encoder, temp_dir, fps, planned_clip, debug_callback) = args
+    elif len(args) >= 9:
         (i, video_file, final_duration, target_size,
          use_nvenc, gpu_encoder, temp_dir, fps, planned_clip) = args
     else:
@@ -362,7 +435,10 @@ def create_clip_parallel(args):
         
         # Output file
         temp_clip_path = os.path.join(temp_dir, f"temp_clip_{i}_{uuid.uuid4().hex}.mp4")
-        
+
+        if debug_callback:
+            debug_callback(f"Clip {i + 1}: {os.path.basename(video_file)} @ {clip_start:.1f}s")
+
         extract_kwargs = {
             'video_file': video_file,
             'start_time': clip_start,
@@ -432,7 +508,9 @@ def _build_non_overlapping_fallback_sequence(
     for src in sources:
         video_file = str(src["video_file"])
         if video_file not in cursors:
-            cursors[video_file] = min(edge_buffer_seconds, float(src["video_duration"]))
+            # A static-photo loop has no unstable start/end, so it never needs the buffer.
+            source_buffer = 0.0 if is_image_loop_video(video_file) else edge_buffer_seconds
+            cursors[video_file] = min(source_buffer, float(src["video_duration"]))
     planned: List[Dict] = []
     next_source_index = 0
     forced_map: Dict[int, str] = {}
@@ -458,8 +536,9 @@ def _build_non_overlapping_fallback_sequence(
             source = sources[source_idx]
             video_file = str(source["video_file"])
             video_duration = float(source["video_duration"])
+            source_buffer = 0.0 if is_image_loop_video(video_file) else edge_buffer_seconds
             max_start_full = max(0.0, video_duration - required)
-            max_start = max(min(edge_buffer_seconds, max_start_full), max_start_full - edge_buffer_seconds)
+            max_start = max(min(source_buffer, max_start_full), max_start_full - source_buffer)
             cursor = max(0.0, float(cursors.get(video_file, 0.0)))
             if cursor <= max_start + 1e-9:
                 start_time = min(cursor, max_start)
@@ -542,36 +621,39 @@ def _build_legacy_random_fallback_sequence(
         forced_video = forced_map.get(i)
         if forced_video and forced_video in durations:
             chosen_file = forced_video
+            source_buffer = 0.0 if is_image_loop_video(chosen_file) else edge_buffer_seconds
             video_duration = durations.get(str(chosen_file), 0.0)
             max_start_full = max(0.0, video_duration - duration)
             if sequential:
-                cursor = cursors.get(str(chosen_file), edge_buffer_seconds)
+                cursor = cursors.get(str(chosen_file), source_buffer)
                 if max_start_full <= 0.0:
                     start_time = 0.0
                 elif cursor > max_start_full + 1e-9:
-                    start_time = min(edge_buffer_seconds, max_start_full)
+                    start_time = min(source_buffer, max_start_full)
                 else:
                     start_time = min(cursor, max_start_full)
                 cursors[str(chosen_file)] = start_time + duration
             else:
-                start_time = min(max(edge_buffer_seconds, 0.0), max_start_full)
+                start_time = min(max(source_buffer, 0.0), max_start_full)
         elif sequential:
             chosen_file = assignment[i]
+            source_buffer = 0.0 if is_image_loop_video(chosen_file) else edge_buffer_seconds
             video_duration = durations.get(str(chosen_file), 0.0)
             max_start_full = max(0.0, video_duration - duration)
-            cursor = cursors.get(str(chosen_file), edge_buffer_seconds)
+            cursor = cursors.get(str(chosen_file), source_buffer)
             if max_start_full <= 0.0:
                 start_time = 0.0
             elif cursor > max_start_full + 1e-9:
-                start_time = min(edge_buffer_seconds, max_start_full)  # wrap: reuse this video from the start
+                start_time = min(source_buffer, max_start_full)  # wrap: reuse this video from the start
             else:
                 start_time = min(cursor, max_start_full)
             cursors[str(chosen_file)] = start_time + duration
         else:
             chosen_file = random.choices(list(ordered_files), weights=weights, k=1)[0]
+            source_buffer = 0.0 if is_image_loop_video(chosen_file) else edge_buffer_seconds
             video_duration = durations.get(str(chosen_file), 0.0)
             max_start_full = max(0.0, video_duration - duration)
-            start_time = min(max(edge_buffer_seconds, 0.0), max_start_full)
+            start_time = min(max(source_buffer, 0.0), max_start_full)
         planned.append({
             "index": i,
             "video_file": chosen_file,
@@ -607,7 +689,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       start_text_duration: float = 3.0,
                       end_text: str = '',
                       end_text_position: str = 'bottom_center',
-                      end_text_duration: float = 3.0) -> str:
+                      end_text_duration: float = 3.0,
+                      debug_callback: Callable[[str], None] | None = None) -> str:
     """
     Creates a music video with video clips cut to detected beats.
     
@@ -751,8 +834,16 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         clip_order_mode=clip_order_mode,
         first_video=first_video,
         last_video=last_video,
+        debug_callback=debug_callback,
     )
     if not planned_clip_sequence:
+        fallback_warning = (
+            "AV planner (AI/editorial scoring) produced no usable plan; falling back to naive "
+            "sequential fill (no Qwen tags, no quality/beauty/action scoring)."
+        )
+        print(f"   ⚠️  {fallback_warning}")
+        if debug_callback:
+            debug_callback(f"Warning: {fallback_warning}")
         if strict_unique_non_overlap:
             planned_clip_sequence = _build_non_overlapping_fallback_sequence(
                 segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
@@ -800,6 +891,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         prores_map = {}
         for idx, video_file in enumerate(video_files, 1):
             print(f"Converting {idx}/{len(video_files)}...")
+            if debug_callback:
+                debug_callback(f"ProRes convert: {os.path.basename(video_file)} ({idx}/{len(video_files)})")
             prores_file = convert_to_prores_proxy(video_file, prores_dir, prores_fps)
             prores_files.append(prores_file)
             prores_map[os.path.abspath(video_file)] = prores_file
@@ -930,7 +1023,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
             video_file = planned_clip.get('video_file')
             clip_args.append((i, video_file, final_duration,
                             target_size, use_nvenc, gpu_encoder, session_temp_dir, fps,
-                            planned_clip))
+                            planned_clip, debug_callback))
         
         clip_files = [None] * len(clip_args)
         clip_timings: List[float] = []

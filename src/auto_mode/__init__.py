@@ -251,7 +251,8 @@ def analyze_beats_auto(audio_file: str, start_time: float = 0.0,
                        enable_qwen_semantics: bool = True,
                        qwen_model_path: str = None,
                        progress_callback: Callable[[str], None] | None = None,
-                       console_callback: Callable[[int, str], None] | None = None) -> Tuple[np.ndarray, Dict]:
+                       console_callback: Callable[[int, str], None] | None = None,
+                       debug_callback: Callable[[str], None] | None = None) -> Tuple[np.ndarray, Dict]:
     """
     Build a cleaner Auto Mode cut plan.
 
@@ -385,6 +386,7 @@ def analyze_beats_auto(audio_file: str, start_time: float = 0.0,
                 use_gpu=use_gpu,
                 enable_ai=qwen_enabled,
                 qwen_model_path=model_path,
+                debug_callback=debug_callback,
             )
         except Exception as e:
             print(f"   ⚠️  Video analysis failed; renderer will use fallback sampling: {e}")

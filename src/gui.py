@@ -190,6 +190,12 @@ class StageConsoleLogger:
             self._write(f"  {message}\n")
             self.stage_line_count += 1
 
+    def debug(self, message: str) -> None:
+        """Uncapped per-file progress line, e.g. which file is currently being processed."""
+        message = self._clean(message)
+        if message:
+            self._write(f"    • {message}\n")
+
     def end_stage(self) -> None:
         if self.stage_number is None:
             return
@@ -456,9 +462,11 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
 
         audio_duration = get_video_duration(local_audio_path)
         image_source_dir = os.path.join(session_dir, 'image_sources')
+        debug_callback = console_logger.debug if console_logger else None
         local_video_paths = prepare_visual_sources(
             local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds,
             use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores, target_size=target_resolution,
+            debug_callback=debug_callback,
         )
             
         # Prepare output paths
@@ -477,6 +485,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             video_files=local_video_paths,
             progress_callback=progress_callback,
             console_callback=lambda stage, message: console_logger.stage_line(stage, message) if console_logger else None,
+            debug_callback=debug_callback,
         )
         beat_times = beat_info.get('times', selected_beats)
         _stage5_summary(console_logger, beat_info.get("video_analysis"))
@@ -503,6 +512,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             end_text=end_text or '',
             end_text_position=end_text_position or 'bottom_center',
             end_text_duration=float(end_text_duration) if end_text_duration is not None else 3.0,
+            debug_callback=debug_callback,
         )
 
         # Move to output folder
@@ -683,7 +693,7 @@ def cleanup_on_startup():
     the persistent video analysis cache, and previously uploaded files.
     """
     input_base = get_input_dir()
-    protected_dirs = {'audio', 'video', 'video_analysis_cache', 'gradio_uploads'}
+    protected_dirs = {'audio', 'video', 'video_analysis_cache', 'gradio_uploads', 'image_loop_cache'}
 
     try:
         os.makedirs(get_audio_input_dir(), exist_ok=True)
@@ -826,16 +836,19 @@ def _restore_uploads():
         audio_path = saved_audio
 
     video_folder = state.get('video_folder') or ''
-    video_paths = _scan_video_folder(video_folder) or [p for p in state.get('videos', []) if p and os.path.isfile(p)]
-    preferred_paths = [p for p in state.get('preferred', []) if p in video_paths]
-    first_video = state.get('first_video') if state.get('first_video') in video_paths else None
-    last_video = state.get('last_video') if state.get('last_video') in video_paths else None
+    uploaded_video_paths = [p for p in state.get('videos', []) if p and os.path.isfile(p)]
+    # Choices can come from a scanned folder, but the File component's value must stay
+    # limited to files Gradio actually uploaded/cached, or it rejects external paths.
+    choice_paths = _scan_video_folder(video_folder) or uploaded_video_paths
+    preferred_paths = [p for p in state.get('preferred', []) if p in choice_paths]
+    first_video = state.get('first_video') if state.get('first_video') in choice_paths else None
+    last_video = state.get('last_video') if state.get('last_video') in choice_paths else None
 
     return (
-        audio_path, (video_paths or None), video_folder,
-        gr.update(choices=_video_choice_pairs(video_paths), value=preferred_paths),
-        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=first_video or ''),
-        gr.update(choices=_video_choice_pairs_with_none(video_paths), value=last_video or ''),
+        audio_path, (uploaded_video_paths or None), video_folder,
+        gr.update(choices=_video_choice_pairs(choice_paths), value=preferred_paths),
+        gr.update(choices=_video_choice_pairs_with_none(choice_paths), value=first_video or ''),
+        gr.update(choices=_video_choice_pairs_with_none(choice_paths), value=last_video or ''),
     )
 
 

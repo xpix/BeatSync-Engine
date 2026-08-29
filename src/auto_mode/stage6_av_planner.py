@@ -77,6 +77,16 @@ def _buffered_start_bounds(video_duration: float, source_duration: float, edge_b
     return lo, hi
 
 
+def _is_image_loop_video(video_file: str) -> bool:
+    """True for the synthetic per-image loop videos created by prepare_visual_sources()."""
+    return os.path.basename(str(video_file)).startswith("image_source_")
+
+
+def _effective_edge_buffer(video_file: str, edge_buffer_seconds: float) -> float:
+    """A static-photo loop has no unstable start/end, so it never needs the buffer."""
+    return 0.0 if _is_image_loop_video(video_file) else edge_buffer_seconds
+
+
 def build_planned_clip_sequence(
     cut_times: Sequence[float],
     segment_durations: Sequence[float],
@@ -88,6 +98,7 @@ def build_planned_clip_sequence(
     clip_order_mode: str = "auto",
     first_video: str | None = None,
     last_video: str | None = None,
+    debug_callback=None,
 ) -> List[Dict]:
     """Build exact source clip choices for every output segment.
 
@@ -97,9 +108,10 @@ def build_planned_clip_sequence(
     edge_buffer_seconds: portion at the very start/end of each source video that
     is never used for a clip (e.g. to skip intros/outros or unstable footage).
     clip_order_mode: "auto" (editorial scoring, default), "chronological"
-    (source videos consumed in file-modified-time order), or "name" (consumed
-    in alphabetical filename order). In the non-auto modes, clips are drawn from
-    one source video at a time, in the given order, before moving to the next.
+    (sources ordered by file-modified-time), or "name" (ordered by alphabetical
+    filename). In the non-auto modes, one clip is drawn from each source in that
+    order, then it wraps back to the first and repeats, so every source is used
+    before any source is used a second time.
     first_video/last_video: when given, pin the very first/last output segment
     to a clip from that source video (falls back to normal selection if that
     video has no usable candidate for the segment).
@@ -125,16 +137,25 @@ def build_planned_clip_sequence(
     usage = Counter()
     used_candidate_ids: set[str] = set()
     occupied_ranges: Dict[str, List[tuple[float, float]]] = {}
-    planned: List[Dict] = []
+    planned_by_index: Dict[int, Dict] = {}
     video_order = _sorted_unique_videos(candidates, clip_order_mode)
     active_video_idx = [0]
+    exhausted_ordered_videos: set[str] = set()
     forced_segment_videos = _forced_segment_videos(len(profiles), first_video, last_video)
+    failed_segment_indices: List[int] = []
+    used_image_videos: set[str] = set()
 
     for i, profile in enumerate(profiles):
         planned_clip = None
+        # A still-photo loop looks identical at every offset, so once one has been
+        # used its remaining candidates are dropped from the pool entirely.
+        available_candidates = (
+            [c for c in candidates if str(c.get("video_file") or "") not in used_image_videos]
+            if used_image_videos else candidates
+        )
         forced_video = forced_segment_videos.get(i)
         if forced_video:
-            pool = [c for c in candidates if str(c.get("video_file") or "") == forced_video]
+            pool = [c for c in available_candidates if str(c.get("video_file") or "") == forced_video]
             planned_clip = _choose_for_segment(
                 candidates=pool,
                 profile=profile,
@@ -150,7 +171,7 @@ def build_planned_clip_sequence(
             ) if pool else None
         if planned_clip is None and video_order:
             planned_clip = _select_ordered_segment(
-                candidates=candidates,
+                candidates=available_candidates,
                 profile=profile,
                 recent_ids=recent_ids,
                 recent_videos=recent_videos,
@@ -163,10 +184,11 @@ def build_planned_clip_sequence(
                 edge_buffer_seconds=edge_buffer_seconds,
                 video_order=video_order,
                 active_idx=active_video_idx,
+                exhausted_videos=exhausted_ordered_videos,
             )
         if planned_clip is None:
             planned_clip = _choose_for_segment(
-                candidates=candidates,
+                candidates=available_candidates,
                 profile=profile,
                 recent_ids=recent_ids,
                 recent_videos=recent_videos,
@@ -180,6 +202,7 @@ def build_planned_clip_sequence(
             )
 
         if not planned_clip:
+            failed_segment_indices.append(i)
             continue
         candidate_id = str(planned_clip.get("candidate_id") or "")
         video_file = str(planned_clip.get("video_file") or "")
@@ -187,7 +210,7 @@ def build_planned_clip_sequence(
         source_duration = max(0.05, float(planned_clip.get("source_duration") or 0.05))
         end_time = start_time + source_duration
 
-        planned.append(planned_clip)
+        planned_by_index[i] = planned_clip
         if candidate_id:
             if strict_unique_non_overlap:
                 used_candidate_ids.add(candidate_id)
@@ -198,7 +221,57 @@ def build_planned_clip_sequence(
             usage[video_file] += 1
             if strict_unique_non_overlap:
                 occupied_ranges.setdefault(video_file, []).append((start_time, end_time))
+            if _is_image_loop_video(video_file):
+                used_image_videos.add(video_file)
 
+    if failed_segment_indices:
+        preview = failed_segment_indices[:10]
+        more = f" (+{len(failed_segment_indices) - 10} more)" if len(failed_segment_indices) > 10 else ""
+        message = (
+            f"AV planner: {len(failed_segment_indices)}/{len(durations_arr)} segment(s) had no "
+            f"non-overlapping candidate (indices {preview}{more}, mode={clip_order_mode}, "
+            f"candidate pool={len(candidates)}, sources={len({c.get('video_file') for c in candidates})}). "
+            f"Repairing with best-scoring overlap-allowed picks so the rest of the AI-scored plan is kept."
+        )
+        print(f"   ⚠️  {message}", flush=True)
+        if debug_callback:
+            debug_callback(f"Warning: {message}")
+
+        for i in failed_segment_indices:
+            profile = profiles[i]
+            repair_pool = [
+                c for c in candidates if str(c.get("video_file") or "") not in used_image_videos
+            ] or candidates
+            candidate = _choose_relaxed_candidate(
+                candidates=repair_pool,
+                profile=profile,
+                recent_ids=recent_ids,
+                recent_videos=recent_videos,
+                usage=usage,
+                index=i,
+                preferred_videos=preferred_set,
+            )
+            if not candidate:
+                continue
+            repaired_clip = _materialize_clip(
+                candidate=candidate,
+                profile=profile,
+                index=i,
+                edge_buffer_seconds=edge_buffer_seconds,
+            )
+            planned_by_index[i] = repaired_clip
+            candidate_id = str(repaired_clip.get("candidate_id") or "")
+            video_file = str(repaired_clip.get("video_file") or "")
+            if candidate_id:
+                recent_ids.append(candidate_id)
+                usage[candidate_id] += 1
+            if video_file:
+                recent_videos.append(video_file)
+                usage[video_file] += 1
+                if _is_image_loop_video(video_file):
+                    used_image_videos.add(video_file)
+
+    planned = [planned_by_index[i] for i in range(len(profiles)) if i in planned_by_index]
     if len(planned) != len(durations_arr):
         return []
     return planned
@@ -345,10 +418,19 @@ def _select_ordered_segment(
     edge_buffer_seconds: float,
     video_order: List[str],
     active_idx: List[int],
+    exhausted_videos: set[str],
 ) -> Dict | None:
-    """Fill the current segment from the active source video, advancing to the next one when exhausted."""
-    while active_idx[0] < len(video_order):
+    """Round-robin across the source videos in the fixed order: one clip per source
+    per lap, then wrap back to the first. Sources with no usable candidate left are
+    marked exhausted and skipped on later laps."""
+    order_len = len(video_order)
+    for _ in range(order_len):
+        if active_idx[0] >= order_len:
+            active_idx[0] = 0
         current_video = video_order[active_idx[0]]
+        if current_video in exhausted_videos:
+            active_idx[0] += 1
+            continue
         pool = [c for c in candidates if str(c.get("video_file") or "") == current_video]
         clip = _choose_for_segment(
             candidates=pool,
@@ -363,9 +445,10 @@ def _select_ordered_segment(
             preferred_videos=preferred_videos,
             edge_buffer_seconds=edge_buffer_seconds,
         ) if pool else None
+        active_idx[0] += 1
         if clip:
             return clip
-        active_idx[0] += 1
+        exhausted_videos.add(current_video)
     return None
 
 
@@ -441,7 +524,8 @@ def _select_non_overlapping_start(
     window_end = max(window_start, max(start, end))
 
     video_duration = float(candidate.get("video_duration", window_end))
-    allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, edge_buffer_seconds)
+    effective_buffer = _effective_edge_buffer(str(candidate.get("video_file") or ""), edge_buffer_seconds)
+    allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, effective_buffer)
     window_start = max(window_start, allowed_lo)
     window_end = min(window_end, allowed_hi + source_duration)
 
@@ -625,7 +709,8 @@ def _materialize_clip(
 
     if start_time is None:
         video_duration = max(source_duration, float(candidate.get("video_duration", source_duration)))
-        allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, edge_buffer_seconds)
+        effective_buffer = _effective_edge_buffer(str(candidate.get("video_file") or ""), edge_buffer_seconds)
+        allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, effective_buffer)
         anchor = float(candidate.get("center", candidate.get("start", 0.0)))
         start_time = anchor - source_duration * 0.44
         start_time = max(allowed_lo, min(start_time, allowed_hi))

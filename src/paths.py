@@ -11,6 +11,7 @@ AUDIO_INPUT_DIR = os.path.join(INPUT_DIR, 'audio')
 VIDEO_INPUT_DIR = os.path.join(INPUT_DIR, 'video')
 PROCESSING_DIR = os.path.join(INPUT_DIR, 'processing')
 GRADIO_TEMP_DIR = os.path.join(INPUT_DIR, 'gradio_uploads')
+IMAGE_LOOP_CACHE_DIR = os.path.join(INPUT_DIR, 'image_loop_cache')
 OUTPUT_DIR = os.path.join(ROOT_DIR, 'output')
 
 
@@ -22,6 +23,7 @@ def ensure_project_dirs() -> None:
         VIDEO_INPUT_DIR,
         PROCESSING_DIR,
         GRADIO_TEMP_DIR,
+        IMAGE_LOOP_CACHE_DIR,
         OUTPUT_DIR,
     ]:
         os.makedirs(directory, exist_ok=True)
@@ -50,6 +52,11 @@ def get_processing_dir() -> str:
 def get_gradio_temp_dir() -> str:
     """Get the Gradio upload/temp directory path."""
     return GRADIO_TEMP_DIR
+
+
+def get_image_loop_cache_dir() -> str:
+    """Get the persistent cache directory for generated per-image loop videos."""
+    return IMAGE_LOOP_CACHE_DIR
 
 
 def get_output_dir() -> str:

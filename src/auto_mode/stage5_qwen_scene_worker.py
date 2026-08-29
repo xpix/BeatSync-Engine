@@ -31,7 +31,7 @@ import numpy as np
 from PIL import Image
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 BIN_DIR = ROOT_DIR / "bin"
 DEFAULT_LLAMA_DIR = BIN_DIR / "llama-bin-win-vulkan-x64"
 DEFAULT_MODEL = BIN_DIR / "models" / "Qwen3VL-2B-Instruct-Q8_0.gguf"
