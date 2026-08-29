@@ -36,6 +36,7 @@ from paths import (
     get_processing_dir,
     get_image_loop_cache_dir,
 )
+from media_time import get_recording_timestamp
 
 # Import FFmpeg processing module
 from ffmpeg_processing import (
@@ -284,7 +285,8 @@ def parse_arguments() -> argparse.Namespace:
         choices=['auto', 'chronological', 'name'],
         default='auto',
         help='Order source videos appear in the output: auto (AI editorial selection), '
-             'chronological (by file modified time), or name (alphabetical filename) (default: auto)'
+             'chronological (by real capture date from EXIF/container metadata, '
+             'falling back to file modified time), or name (alphabetical filename) (default: auto)'
     )
     parser.add_argument(
         '--first-video',
@@ -329,12 +331,8 @@ def _sort_video_files(video_files: Sequence[str], clip_order_mode: str) -> List[
     if clip_order_mode == "name":
         files.sort(key=lambda f: os.path.basename(f).lower())
     elif clip_order_mode == "chronological":
-        def _mtime(f: str) -> float:
-            try:
-                return os.path.getmtime(f)
-            except OSError:
-                return float("inf")
-        files.sort(key=_mtime)
+        # Real capture time (EXIF / container metadata); file mtime only as fallback.
+        files.sort(key=lambda f: (get_recording_timestamp(f), os.path.basename(f).lower()))
     return files
 
 

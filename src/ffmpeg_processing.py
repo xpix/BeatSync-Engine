@@ -341,9 +341,11 @@ def _title_font_size(text: str, frame_w: int, frame_h: int) -> int:
     drawtext has no auto-fit, so we size from the character count: Arial-like
     faces advance roughly 0.5 * fontsize per glyph. We aim for a text width of
     ~1/3 of the frame, keep a generous floor so it always reads big, and cap it
-    so it never grows past the frame width or a third of the height.
+    so it never grows past the frame width or a third of the height. For a
+    multi-line title the longest line drives the width.
     """
-    n = max(1, len(str(text or '').strip()))
+    lines = [ln for ln in str(text or '').strip().splitlines() if ln.strip()]
+    n = max(1, max((len(ln) for ln in lines), default=len(str(text or '').strip())))
     aim_width = 0.34 * frame_w                      # target: about a third of the width
     by_width = aim_width / (0.5 * n)
     floor = frame_h / 10.0                          # always clearly visible
@@ -379,25 +381,38 @@ def add_text_overlays_ffmpeg(output_file: str, start_text: str = '',
     fade_out = min(fade_out, max(0.0, video_duration - fade_in))
 
     overlays = []
+    temp_text_files: list[str] = []
     if have_text:
         if not font_file or not os.path.isfile(font_file):
             font_file = DEFAULT_TEXT_FONT_FILE
         font_arg = _escape_drawtext_fontfile(font_file)
+        text_base = os.path.splitext(output_file)[0]
 
         def add_overlay(text: str, position: str, visible_from: float, visible_to: float) -> None:
-            text = str(text or '').strip()
+            # Keep internal line breaks, normalise CRLF, drop only outer whitespace.
+            text = str(text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
             if not text or visible_to <= visible_from:
                 return
             x, y = _TEXT_POSITIONS.get(position, _TEXT_POSITIONS['bottom_center'])
-            escaped_text = _escape_drawtext_value(text)
             font_size = _title_font_size(text, frame_w, frame_h)
             border_w = max(2, round(font_size / 18))
-            overlays.append(
-                f"drawtext=fontfile='{font_arg}':"
-                f"text='{escaped_text}':fontcolor=white:fontsize={font_size}:"
-                f"borderw={border_w}:bordercolor=black:"
-                f"x={x}:y={y}:enable='between(t,{visible_from:.3f},{visible_to:.3f})':expansion=none"
+            line_spacing = max(4, round(font_size / 10))
+            common = (
+                f":fontcolor=white:fontsize={font_size}:borderw={border_w}:bordercolor=black:"
+                f"line_spacing={line_spacing}:x={x}:y={y}:"
+                f"enable='between(t,{visible_from:.3f},{visible_to:.3f})':expansion=none"
             )
+            # Pass the text via a UTF-8 file so real newlines become line breaks and
+            # ':' / ',' / quotes in the title need no filtergraph escaping.
+            try:
+                tf = f"{text_base}_txt_{uuid.uuid4().hex}.txt"
+                with open(tf, 'w', encoding='utf-8', newline='\n') as fh:
+                    fh.write(text)
+                temp_text_files.append(tf)
+                overlays.append(f"drawtext=fontfile='{font_arg}':textfile='{_escape_drawtext_fontfile(tf)}'{common}")
+            except OSError:
+                flat = _escape_drawtext_value(text.replace('\n', ' '))
+                overlays.append(f"drawtext=fontfile='{font_arg}':text='{flat}'{common}")
 
         start_duration = max(0.0, float(start_duration or 0.0))
         end_duration = max(0.0, float(end_duration or 0.0))
@@ -454,6 +469,8 @@ def add_text_overlays_ffmpeg(output_file: str, start_text: str = '',
         return output_file
     finally:
         _safe_remove_file(temp_output)
+        for tf in temp_text_files:
+            _safe_remove_file(tf)
 
 
 def convert_to_prores_proxy(video_file: str, output_dir: str, fps: float = None) -> str:

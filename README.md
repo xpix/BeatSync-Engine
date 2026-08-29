@@ -72,7 +72,9 @@ on top of the upstream engine. All new UI fields are labelled in German.
 ### 📝 Start / end text overlays
 
 *   Optional burned-in **Start-Text** and **End-Text** titles with 9 position presets
-    (corners, edges, centre) and an independent on-screen duration per title.
+    (corners, edges, centre) and an independent on-screen duration per title. The title
+    fields are multi-line; line breaks are passed to `drawtext` via a UTF-8 `textfile`
+    (real newlines, so `:` `,` `'` in a title need no escaping).
 *   **Selectable font** ("🔤 Schriftart") from the installed Windows fonts (Arial, Impact,
     Bahnschrift, Georgia, …) with a live browser preview card that renders your actual text
     in the chosen face.
@@ -104,9 +106,14 @@ on top of the upstream engine. All new UI fields are labelled in German.
 
 *   New **"Clip-Reihenfolge"** radio:
     *   🤖 **Automatisch** – AI/editorial selection (default, upstream behaviour).
-    *   📅 **Chronologisch** – source videos used in recording / file-modified-time order.
+    *   📅 **Chronologisch** – source clips ordered by their **real capture date**.
     *   🔤 **Alphabetisch** – source videos used in filename order.
 *   Sequential modes fill each source completely before moving to the next one.
+*   Capture date is read by the new `media_time.get_recording_timestamp()`:
+    EXIF `DateTimeOriginal` (with `OffsetTimeOriginal` if present) for images via Pillow,
+    QuickTime `com.apple.quicktime.creationdate` / `creation_time` for videos via ffprobe,
+    and only **falls back to the file's modified time** when no capture metadata exists
+    (or it is implausibly old). Results are cached per file signature.
 
 ### ⏮️⏭️ First / last video pinning
 
@@ -179,6 +186,7 @@ BeatSync Engine/
 │   ├── video_processor.py                   # Rendering pipeline
 │   ├── video_analysis.py                    # Source-video visual library
 │   ├── ffmpeg_processing.py                 # FFmpeg/FFprobe helpers
+│   ├── media_time.py                        # Real capture date (EXIF / container), mtime fallback
 │   ├── auto_mode/
 │   │   ├── __init__.py                      # Auto Mode pipeline entry point
 │   │   ├── stage1_audio.py                  # Beat grid detection

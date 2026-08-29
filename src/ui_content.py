@@ -336,7 +336,11 @@ LABEL_EDGE_BUFFER_SECONDS = "✂️ Rand-Puffer (Sekunden)"
 INFO_EDGE_BUFFER_SECONDS = "Anfang und Ende jedes Quellvideos werden um diese Anzahl Sekunden nicht für Clips verwendet."
 
 LABEL_CLIP_ORDER_MODE = "🔀 Clip-Reihenfolge"
-INFO_CLIP_ORDER_MODE = "Legt fest, in welcher Reihenfolge die Quellvideos im fertigen Video verwendet werden."
+INFO_CLIP_ORDER_MODE = (
+    "Legt fest, in welcher Reihenfolge die Quellvideos im fertigen Video verwendet werden. "
+    "Chronologisch nutzt das echte Aufnahmedatum aus den EXIF-/Container-Metadaten; "
+    "fehlt es, wird auf das Datei-Änderungsdatum zurückgegriffen."
+)
 
 LABEL_FIRST_VIDEO = "⏮️ Start-Video"
 INFO_FIRST_VIDEO = "Dieses Video liefert den allerersten Clip im fertigen Video."
@@ -416,6 +420,7 @@ def render_font_preview_html(font_name: str | None, sample: str = FONT_PREVIEW_S
     css = dict(get_available_text_fonts()).get(font_name or "", "Arial, sans-serif")
     label = font_name or DEFAULT_TEXT_FONT
     safe = (str(sample or "").strip() or FONT_PREVIEW_SAMPLE).replace("<", "&lt;").replace(">", "&gt;")
+    safe = safe.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
     return (
         '<div style="padding:16px;border:1px solid var(--border-color-primary,#3d3d3d);'
         'border-radius:10px;background:#101010;text-align:center;">'

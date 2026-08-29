@@ -943,11 +943,11 @@ def create_ui() -> gr.Blocks:
                     )
                     with gr.Group():
                         gr.Markdown('#### 📝 Text-Einblendungen')
-                        start_text = gr.Textbox(label=LABEL_START_TEXT, info=INFO_START_TEXT)
+                        start_text = gr.Textbox(label=LABEL_START_TEXT, info=INFO_START_TEXT, lines=2, max_lines=4)
                         with gr.Row():
                             start_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
                             start_text_duration = gr.Number(value=3.0, minimum=0.1, precision=1, label=LABEL_TEXT_DURATION)
-                        end_text = gr.Textbox(label=LABEL_END_TEXT, info=INFO_END_TEXT)
+                        end_text = gr.Textbox(label=LABEL_END_TEXT, info=INFO_END_TEXT, lines=2, max_lines=4)
                         with gr.Row():
                             end_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
                             end_text_duration = gr.Number(value=3.0, minimum=0.1, precision=1, label=LABEL_TEXT_DURATION)

@@ -11,6 +11,16 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
+try:
+    # src/ is on sys.path once the auto_mode package is imported (see __init__.py).
+    from media_time import get_recording_timestamp
+except Exception:  # pragma: no cover - fallback if imported in isolation
+    def get_recording_timestamp(path: str, fallback_to_mtime: bool = True) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return float("inf")
+
 CLIP_ORDER_MODES = ("auto", "chronological", "name")
 
 
@@ -44,12 +54,8 @@ def _sorted_unique_videos(candidates: Sequence[Dict], clip_order_mode: str) -> L
     if clip_order_mode == "name":
         videos.sort(key=lambda v: os.path.basename(v).lower())
     else:
-        def _mtime(v: str) -> float:
-            try:
-                return os.path.getmtime(v)
-            except OSError:
-                return float("inf")
-        videos.sort(key=_mtime)
+        # Real capture time (EXIF / container metadata); file mtime only as fallback.
+        videos.sort(key=lambda v: (get_recording_timestamp(v), os.path.basename(v).lower()))
     return videos
 
 
