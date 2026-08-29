@@ -325,43 +325,112 @@ def _escape_drawtext_value(text: str) -> str:
     return str(text).replace('\\', r'\\').replace("'", r"\'").replace(':', r'\:').replace(',', r'\,').replace('\n', r'\n')
 
 
+def _escape_drawtext_fontfile(path: str) -> str:
+    """Escape a Windows font path for use inside a drawtext filter string."""
+    return str(path).replace('\\', '/').replace(':', r'\:')
+
+
+DEFAULT_TEXT_FONT_FILE = os.path.join(
+    os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', 'arial.ttf'
+)
+
+
+def _title_font_size(text: str, frame_w: int, frame_h: int) -> int:
+    """Font size so a short title fills at least ~1/3 of the frame.
+
+    drawtext has no auto-fit, so we size from the character count: Arial-like
+    faces advance roughly 0.5 * fontsize per glyph. We aim for a text width of
+    ~1/3 of the frame, keep a generous floor so it always reads big, and cap it
+    so it never grows past the frame width or a third of the height.
+    """
+    n = max(1, len(str(text or '').strip()))
+    aim_width = 0.34 * frame_w                      # target: about a third of the width
+    by_width = aim_width / (0.5 * n)
+    floor = frame_h / 10.0                          # always clearly visible
+    ceil_w = (0.95 * frame_w) / (0.5 * n)           # never overflow the frame
+    ceil_h = frame_h / 3.0                          # never taller than a third
+    size = min(max(by_width, floor), ceil_w, ceil_h)
+    return int(max(16, round(size)))
+
+
 def add_text_overlays_ffmpeg(output_file: str, start_text: str = '',
                               start_position: str = 'bottom_center', start_duration: float = 3.0,
                               end_text: str = '', end_position: str = 'bottom_center',
                               end_duration: float = 3.0, use_nvenc: bool = False,
-                              gpu_encoder: str = 'h264_nvenc', fps: float = 30.0) -> str:
-    """Burn optional start/end titles into an already assembled output video."""
-    if not str(start_text or '').strip() and not str(end_text or '').strip():
+                              gpu_encoder: str = 'h264_nvenc', fps: float = 30.0,
+                              font_file: str | None = None,
+                              fade_in: float = 0.0, fade_out: float = 0.0) -> str:
+    """Burn optional start/end titles and/or a black fade in/out into an assembled video.
+
+    The fade filters run *after* drawtext, so any start/end title is dimmed by the same
+    black ramp -- it fades up out of the opening blende and fades down into the closing
+    one instead of just cutting on and off. A matching audio fade is applied too.
+    """
+    have_text = bool(str(start_text or '').strip() or str(end_text or '').strip())
+    fade_in = max(0.0, float(fade_in or 0.0))
+    fade_out = max(0.0, float(fade_out or 0.0))
+    if not have_text and fade_in <= 0.0 and fade_out <= 0.0:
         return output_file
 
-    overlays = []
     video_duration = get_video_duration(output_file)
+    frame_w, frame_h = get_video_resolution(output_file)
+    # Keep the two fades inside the clip and non-overlapping.
+    fade_in = min(fade_in, max(0.0, video_duration))
+    fade_out = min(fade_out, max(0.0, video_duration - fade_in))
 
-    def add_overlay(text: str, position: str, visible_from: float, visible_to: float) -> None:
-        text = str(text or '').strip()
-        if not text or visible_to <= visible_from:
-            return
-        x, y = _TEXT_POSITIONS.get(position, _TEXT_POSITIONS['bottom_center'])
-        escaped_text = _escape_drawtext_value(text)
-        overlays.append(
-            "drawtext=fontfile='C\\:/Windows/Fonts/arial.ttf':"
-            f"text='{escaped_text}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:"
-            f"x={x}:y={y}:enable='between(t,{visible_from:.3f},{visible_to:.3f})':expansion=none"
-        )
+    overlays = []
+    if have_text:
+        if not font_file or not os.path.isfile(font_file):
+            font_file = DEFAULT_TEXT_FONT_FILE
+        font_arg = _escape_drawtext_fontfile(font_file)
 
-    start_duration = max(0.0, float(start_duration or 0.0))
-    end_duration = max(0.0, float(end_duration or 0.0))
-    add_overlay(start_text, start_position, 0.0, min(start_duration, video_duration))
-    add_overlay(end_text, end_position, max(0.0, video_duration - end_duration), video_duration)
-    if not overlays:
+        def add_overlay(text: str, position: str, visible_from: float, visible_to: float) -> None:
+            text = str(text or '').strip()
+            if not text or visible_to <= visible_from:
+                return
+            x, y = _TEXT_POSITIONS.get(position, _TEXT_POSITIONS['bottom_center'])
+            escaped_text = _escape_drawtext_value(text)
+            font_size = _title_font_size(text, frame_w, frame_h)
+            border_w = max(2, round(font_size / 18))
+            overlays.append(
+                f"drawtext=fontfile='{font_arg}':"
+                f"text='{escaped_text}':fontcolor=white:fontsize={font_size}:"
+                f"borderw={border_w}:bordercolor=black:"
+                f"x={x}:y={y}:enable='between(t,{visible_from:.3f},{visible_to:.3f})':expansion=none"
+            )
+
+        start_duration = max(0.0, float(start_duration or 0.0))
+        end_duration = max(0.0, float(end_duration or 0.0))
+        # Make sure a title actually covers its fade so it ramps with the blende.
+        start_visible_to = max(min(start_duration, video_duration), fade_in)
+        end_visible_from = min(max(0.0, video_duration - end_duration),
+                               max(0.0, video_duration - fade_out))
+        add_overlay(start_text, start_position, 0.0, start_visible_to)
+        add_overlay(end_text, end_position, end_visible_from, video_duration)
+
+    video_filters = list(overlays)
+    audio_filters = []
+    if fade_in > 0.0:
+        video_filters.append(f"fade=t=in:st=0:d={fade_in:.3f}:color=black")
+        audio_filters.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0.0:
+        fade_out_start = max(0.0, video_duration - fade_out)
+        video_filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}:color=black")
+        audio_filters.append(f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}")
+    if not video_filters:
         return output_file
 
     base, extension = os.path.splitext(output_file)
     temp_output = f"{base}_text_overlay_{uuid.uuid4().hex}{extension}"
-    print(f"   📝 Adding {len(overlays)} text overlay(s)...")
+    bits = []
+    if overlays:
+        bits.append(f"{len(overlays)} text overlay(s)")
+    if fade_in > 0.0 or fade_out > 0.0:
+        bits.append(f"fade in {fade_in:.2f}s / out {fade_out:.2f}s")
+    print(f"   📝 Adding {', '.join(bits)}...")
     cmd = [
         FFMPEG_PATH, '-nostdin', '-hide_banner', '-i', output_file,
-        '-map', '0:v:0', '-map', '0:a?', '-vf', ','.join(overlays),
+        '-map', '0:v:0', '-map', '0:a?', '-vf', ','.join(video_filters),
     ]
     if output_file.lower().endswith('.mov'):
         cmd.extend(['-c:v', 'prores', '-profile:v', '0', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le'])
@@ -369,7 +438,13 @@ def add_text_overlays_ffmpeg(output_file: str, start_text: str = '',
         cmd.extend(get_nvenc_quality_args(gpu_encoder, include_pix_fmt=True))
     else:
         cmd.extend(get_cpu_h264_quality_args(include_pix_fmt=True))
-    cmd.extend(['-c:a', 'copy', '-fps_mode', 'cfr', '-r', str(fps), '-movflags', '+faststart', '-y', temp_output])
+    if audio_filters:
+        cmd.extend(['-af', ','.join(audio_filters)])
+        cmd.extend(['-c:a', 'pcm_s16le'] if output_file.lower().endswith('.mov')
+                   else ['-c:a', 'aac', '-b:a', '320k'])
+    else:
+        cmd.extend(['-c:a', 'copy'])
+    cmd.extend(['-fps_mode', 'cfr', '-r', str(fps), '-movflags', '+faststart', '-y', temp_output])
 
     try:
         result = _run_media_command(cmd, timeout=600)

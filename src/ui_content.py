@@ -4,6 +4,8 @@ UI Content for BeatSync Engine
 Focused on Auto Mode.
 """
 
+import os
+
 # ============================================================================
 # MAIN UI CONTENT
 # ============================================================================
@@ -353,6 +355,76 @@ TEXT_POSITION_CHOICES = [
     ('Mitte links', 'middle_left'), ('Zentriert', 'middle_center'), ('Mitte rechts', 'middle_right'),
     ('Unten links', 'bottom_left'), ('Unten Mitte', 'bottom_center'), ('Unten rechts', 'bottom_right'),
 ]
+
+LABEL_TEXT_FONT = "🔤 Schriftart"
+INFO_TEXT_FONT = "Schriftart für Start-/End-Text. Die Vorschau darunter zeigt, wie sie aussieht."
+
+LABEL_FADE_ENABLED = "🎬 Ein-/Ausblenden (Schwarzblende)"
+INFO_FADE_ENABLED = "Video und Ton am Anfang aus Schwarz einblenden und am Ende nach Schwarz ausblenden. Start-/End-Text blendet in der Schwarzblende mit ein bzw. aus."
+LABEL_FADE_DURATION = "Blenden-Dauer (Sekunden)"
+
+WINDOWS_FONTS_DIR = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')
+
+# (display label, browser-preview CSS font stack, filename in the Windows fonts dir)
+_TEXT_FONT_CATALOG = [
+    ("Arial", "Arial, sans-serif", "arial.ttf"),
+    ("Arial Black", "'Arial Black', Arial, sans-serif", "ariblk.ttf"),
+    ("Impact", "Impact, 'Arial Black', sans-serif", "impact.ttf"),
+    ("Bahnschrift", "Bahnschrift, 'DIN Alternate', sans-serif", "bahnschrift.ttf"),
+    ("Verdana", "Verdana, sans-serif", "verdana.ttf"),
+    ("Tahoma", "Tahoma, sans-serif", "tahoma.ttf"),
+    ("Trebuchet MS", "'Trebuchet MS', sans-serif", "trebuc.ttf"),
+    ("Segoe UI", "'Segoe UI', sans-serif", "segoeui.ttf"),
+    ("Calibri", "Calibri, sans-serif", "calibri.ttf"),
+    ("Franklin Gothic", "'Franklin Gothic Medium', Arial, sans-serif", "framd.ttf"),
+    ("Georgia", "Georgia, serif", "georgia.ttf"),
+    ("Times New Roman", "'Times New Roman', serif", "times.ttf"),
+    ("Courier New", "'Courier New', monospace", "cour.ttf"),
+    ("Comic Sans MS", "'Comic Sans MS', cursive", "comic.ttf"),
+]
+
+DEFAULT_TEXT_FONT = "Arial"
+FONT_PREVIEW_SAMPLE = "Beispiel-Titel · AaBbGg 123"
+
+
+def get_available_text_fonts() -> list:
+    """(label, css_family) for the catalog fonts actually present on this machine."""
+    present = [
+        (label, css) for label, css, fname in _TEXT_FONT_CATALOG
+        if os.path.isfile(os.path.join(WINDOWS_FONTS_DIR, fname))
+    ]
+    return present or [("Arial", "Arial, sans-serif")]
+
+
+def get_text_font_choices() -> list:
+    """Dropdown (label, value) pairs; the value is the font label itself."""
+    return [(label, label) for label, _css in get_available_text_fonts()]
+
+
+def get_text_font_path(font_name: str | None) -> str:
+    """Absolute path to the .ttf for a font label, falling back to Arial."""
+    lookup = {label: fname for label, _css, fname in _TEXT_FONT_CATALOG}
+    fname = lookup.get(font_name or "", lookup[DEFAULT_TEXT_FONT])
+    path = os.path.join(WINDOWS_FONTS_DIR, fname)
+    if not os.path.isfile(path):
+        path = os.path.join(WINDOWS_FONTS_DIR, lookup[DEFAULT_TEXT_FONT])
+    return path
+
+
+def render_font_preview_html(font_name: str | None, sample: str = FONT_PREVIEW_SAMPLE) -> str:
+    """Small HTML card that previews `sample` in the chosen font using the browser."""
+    css = dict(get_available_text_fonts()).get(font_name or "", "Arial, sans-serif")
+    label = font_name or DEFAULT_TEXT_FONT
+    safe = (str(sample or "").strip() or FONT_PREVIEW_SAMPLE).replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        '<div style="padding:16px;border:1px solid var(--border-color-primary,#3d3d3d);'
+        'border-radius:10px;background:#101010;text-align:center;">'
+        f'<div style="font-family:{css};font-weight:700;color:#fff;font-size:38px;'
+        'line-height:1.2;text-shadow:2px 2px 0 #000,-1px -1px 0 #000;">'
+        f'{safe}</div>'
+        f'<div style="font-family:{css};color:#9aa;opacity:.8;font-size:14px;margin-top:8px;">{label}</div>'
+        '</div>'
+    )
 
 # GPU & Processing
 LABEL_GPU_STATUS = "⚡ GPU Acceleration Status"

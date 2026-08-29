@@ -670,67 +670,107 @@ def _build_legacy_random_fallback_sequence(
     return planned
 
 
+# When repairing a dropped Start-/End-Video pin, keep the pinned source on screen
+# for at least this long so it is actually recognizable, spanning up to this many
+# consecutive beat segments if the first/last cut alone is a very fast one.
+PIN_MIN_VISIBLE_SECONDS = 1.5
+PIN_MAX_SEGMENTS = 4
+
+
 def _enforce_pinned_endpoints(planned_clip_sequence, video_files, first_video, last_video,
                               edge_buffer_seconds, debug_callback=None):
-    """Guarantee the first/last output clip really comes from the pinned Start-/End-Video.
+    """Guarantee the first/last clips really come from the pinned Start-/End-Video.
 
     The AV planner and its fallbacks can silently drop a pin when the pinned source
     was already consumed elsewhere, or has no non-overlapping scene matching that exact
-    cut. A user pin is explicit intent, so as a final step we rewrite just that one clip
-    to the pinned source, anchored at the source's start (first clip) or end (last clip).
+    cut. A user pin is explicit intent, so as a final step we rewrite the affected
+    clip(s) to the pinned source: anchored at the source's start for the first
+    segment(s), or its end for the last segment(s). If the very first/last beat cut is
+    a fast one, the pin is stretched across the following/preceding segments until it
+    has been on screen for PIN_MIN_VISIBLE_SECONDS (capped at PIN_MAX_SEGMENTS).
     """
     if not planned_clip_sequence:
         return planned_clip_sequence
 
+    n = len(planned_clip_sequence)
     known_sources = {os.path.abspath(str(v)) for v in (video_files or ()) if v}
+
+    def _seg_duration(i):
+        c = planned_clip_sequence[i]
+        return max(0.05, float(c.get("final_duration") or c.get("source_duration") or 0.05))
+
+    def _is_pinned_source(i, pinned):
+        return os.path.abspath(str(planned_clip_sequence[i].get("video_file") or "")) == pinned
+
     targets = []
     if first_video:
-        targets.append((0, os.path.abspath(str(first_video)), "start"))
+        targets.append((os.path.abspath(str(first_video)), "start"))
     if last_video:
-        targets.append((len(planned_clip_sequence) - 1, os.path.abspath(str(last_video)), "end"))
+        targets.append((os.path.abspath(str(last_video)), "end"))
 
-    for idx, pinned, anchor in targets:
-        if idx < 0 or idx >= len(planned_clip_sequence) or pinned not in known_sources:
+    for pinned, anchor in targets:
+        endpoint = 0 if anchor == "start" else n - 1
+        if pinned not in known_sources:
             continue
-        clip = planned_clip_sequence[idx]
-        if os.path.abspath(str(clip.get("video_file") or "")) == pinned:
+        if _is_pinned_source(endpoint, pinned):
             continue  # planner already honored the pin
 
-        seg_duration = max(0.05, float(clip.get("final_duration") or clip.get("source_duration") or 0.05))
         try:
             src_duration = max(0.0, float(get_video_duration(pinned)))
         except Exception:
             src_duration = 0.0
-        if src_duration + 1e-3 < seg_duration:
+        buffer = 0.0 if is_image_loop_video(pinned) else max(0.0, float(edge_buffer_seconds))
+        usable = max(0.0, src_duration - buffer)
+
+        if usable + 1e-3 < _seg_duration(endpoint):
             warn = (f"{'Start' if anchor == 'start' else 'End'}-Video pin could not be enforced for the "
                     f"{'first' if anchor == 'start' else 'last'} clip: {os.path.basename(pinned)} is shorter "
-                    f"than the {seg_duration:.2f}s cut.")
+                    f"than the {_seg_duration(endpoint):.2f}s cut.")
             print(f"   ⚠️  {warn}", flush=True)
             if debug_callback:
                 debug_callback(f"Warning: {warn}")
             continue
 
-        buffer = 0.0 if is_image_loop_video(pinned) else max(0.0, float(edge_buffer_seconds))
-        latest_start = max(0.0, src_duration - seg_duration)
-        if anchor == "start":
-            start_time = min(buffer, latest_start)
-        else:
-            start_time = max(min(buffer, latest_start), latest_start - buffer)
+        # Grow the run of segments to pin, inward from the endpoint.
+        step = 1 if anchor == "start" else -1
+        run, total = [], 0.0
+        i = endpoint
+        while 0 <= i < n and len(run) < PIN_MAX_SEGMENTS:
+            if run and _is_pinned_source(i, pinned):
+                break  # planner already put the pinned source here; stop extending
+            d = _seg_duration(i)
+            if run and total + d > usable + 1e-3:
+                break  # source can't supply another non-overlapping sub-range
+            run.append(i)
+            total += d
+            if total >= PIN_MIN_VISIBLE_SECONDS:
+                break
+            i += step
+        run.sort()  # playback order
 
-        new_clip = dict(clip)
-        new_clip.update({
-            "video_file": pinned,
-            "source_name": os.path.basename(pinned),
-            "start_time": start_time,
-            "source_duration": seg_duration,
-            "final_duration": seg_duration,
-            "candidate_id": f"pinned_{anchor}_{idx:05d}",
-            "tags": sorted(set((clip.get("tags") or []) + ["forced_pin"])),
-            "ai_analyzed": False,
-        })
-        planned_clip_sequence[idx] = new_clip
-        msg = (f"{'Start' if anchor == 'start' else 'End'}-Video pin enforced: clip {idx} -> "
-               f"{os.path.basename(pinned)} @ {start_time:.2f}s")
+        # Lay the run out as one contiguous, non-overlapping block inside the source:
+        # from the start for a Start-Video, ending at the source's end for an End-Video.
+        cursor = min(buffer, max(0.0, src_duration - total)) if anchor == "start" \
+            else max(0.0, src_duration - buffer - total)
+        for seg_idx in run:
+            clip = planned_clip_sequence[seg_idx]
+            d = _seg_duration(seg_idx)
+            new_clip = dict(clip)
+            new_clip.update({
+                "video_file": pinned,
+                "source_name": os.path.basename(pinned),
+                "start_time": round(cursor, 6),
+                "source_duration": d,
+                "final_duration": d,
+                "candidate_id": f"pinned_{anchor}_{seg_idx:05d}",
+                "tags": sorted(set((clip.get("tags") or []) + ["forced_pin"])),
+                "ai_analyzed": False,
+            })
+            planned_clip_sequence[seg_idx] = new_clip
+            cursor += d
+
+        msg = (f"{'Start' if anchor == 'start' else 'End'}-Video pin enforced: "
+               f"clip(s) {run} -> {os.path.basename(pinned)} ({total:.2f}s)")
         print(f"   \U0001f4cc {msg}", flush=True)
         if debug_callback:
             debug_callback(msg)
@@ -758,6 +798,9 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       end_text: str = '',
                       end_text_position: str = 'bottom_center',
                       end_text_duration: float = 3.0,
+                      text_font_file: str | None = None,
+                      fade_in_seconds: float = 0.0,
+                      fade_out_seconds: float = 0.0,
                       debug_callback: Callable[[str], None] | None = None) -> str:
     """
     Creates a music video with video clips cut to detected beats.
@@ -789,7 +832,10 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         first_video: source video pinned to the very first output segment
         last_video: source video pinned to the very last output segment
         start_text/end_text: optional titles burned into the start/end of the output
-    
+        text_font_file: .ttf used for the start/end titles
+        fade_in_seconds/fade_out_seconds: length of the opening/closing black fade
+            (video + audio); any start/end title fades with the blende
+
     Returns:
         Path to output video file
     """
@@ -1069,7 +1115,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         output_file = add_text_overlays_ffmpeg(
             output_file, start_text=start_text, start_position=start_text_position,
             start_duration=start_text_duration, end_text=end_text, end_position=end_text_position,
-            end_duration=end_text_duration, use_nvenc=False, fps=fps,
+            end_duration=end_text_duration, use_nvenc=False, fps=fps, font_file=text_font_file,
+            fade_in=fade_in_seconds, fade_out=fade_out_seconds,
         )
         return output_file
     
@@ -1214,6 +1261,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
             output_file, start_text=start_text, start_position=start_text_position,
             start_duration=start_text_duration, end_text=end_text, end_position=end_text_position,
             end_duration=end_text_duration, use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, fps=fps,
+            font_file=text_font_file, fade_in=fade_in_seconds, fade_out=fade_out_seconds,
         )
         return output_file
  

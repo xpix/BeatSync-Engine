@@ -378,6 +378,9 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        end_text: str = '',
                        end_text_position: str = 'bottom_center',
                        end_text_duration: float = 3.0,
+                       text_font: str = DEFAULT_TEXT_FONT,
+                       fade_enabled: bool = False,
+                       fade_duration: float = 1.0,
                        progress_callback: Callable[[str], None] | None = None,
                        console_logger: StageConsoleLogger | None = None) -> StatusResult:
     total_started = time.perf_counter()
@@ -513,6 +516,8 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         if progress_callback:
             progress_callback(_stage_status(6))
 
+        fade_secs = float(fade_duration) if (fade_enabled and fade_duration and float(fade_duration) > 0) else 0.0
+
         # Create video
         result_path = create_music_video(
             local_audio_path, local_video_paths, selected_beats,
@@ -532,6 +537,9 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             end_text=end_text or '',
             end_text_position=end_text_position or 'bottom_center',
             end_text_duration=float(end_text_duration) if end_text_duration is not None else 3.0,
+            text_font_file=get_text_font_path(text_font),
+            fade_in_seconds=fade_secs,
+            fade_out_seconds=fade_secs,
             debug_callback=debug_callback,
         )
 
@@ -607,7 +615,10 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                  start_text_duration: float = 3.0,
                  end_text: str = '',
                  end_text_position: str = 'bottom_center',
-                 end_text_duration: float = 3.0) -> Iterator[StatusResult]:
+                 end_text_duration: float = 3.0,
+                 text_font: str = DEFAULT_TEXT_FONT,
+                 fade_enabled: bool = False,
+                 fade_duration: float = 1.0) -> Iterator[StatusResult]:
     status_queue: queue.Queue[str | None] = queue.Queue()
     result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
     initial_status = _stage_status(1)
@@ -643,6 +654,9 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     end_text=end_text,
                     end_text_position=end_text_position,
                     end_text_duration=end_text_duration,
+                    text_font=text_font,
+                    fade_enabled=fade_enabled,
+                    fade_duration=fade_duration,
                     progress_callback=progress_callback,
                     console_logger=console_logger,
                 )
@@ -937,6 +951,14 @@ def create_ui() -> gr.Blocks:
                         with gr.Row():
                             end_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
                             end_text_duration = gr.Number(value=3.0, minimum=0.1, precision=1, label=LABEL_TEXT_DURATION)
+                        text_font = gr.Dropdown(
+                            choices=get_text_font_choices(), value=DEFAULT_TEXT_FONT,
+                            label=LABEL_TEXT_FONT, info=INFO_TEXT_FONT, elem_id='text-font-input'
+                        )
+                        text_font_preview = gr.HTML(render_font_preview_html(DEFAULT_TEXT_FONT))
+                        with gr.Row():
+                            fade_enabled = gr.Checkbox(value=False, label=LABEL_FADE_ENABLED, info=INFO_FADE_ENABLED)
+                            fade_duration = gr.Number(value=1.0, minimum=0.0, precision=1, label=LABEL_FADE_DURATION)
 
                 with gr.Group():
                     gr.Markdown(f'### 🎬 Processing Mode')
@@ -964,10 +986,24 @@ def create_ui() -> gr.Blocks:
                 session_state, video_folder_input, preferred_videos_input, edge_buffer_seconds, clip_order_mode,
                 first_video_input, last_video_input,
                 start_text, start_text_position, start_text_duration,
-                end_text, end_text_position, end_text_duration,
+                end_text, end_text_position, end_text_duration, text_font,
+                fade_enabled, fade_duration,
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'
+        )
+
+        text_font.change(
+            fn=lambda font, s, e: render_font_preview_html(font, (s or '').strip() or (e or '').strip() or FONT_PREVIEW_SAMPLE),
+            inputs=[text_font, start_text, end_text], outputs=[text_font_preview],
+        )
+        start_text.change(
+            fn=lambda font, s, e: render_font_preview_html(font, (s or '').strip() or (e or '').strip() or FONT_PREVIEW_SAMPLE),
+            inputs=[text_font, start_text, end_text], outputs=[text_font_preview],
+        )
+        end_text.change(
+            fn=lambda font, s, e: render_font_preview_html(font, (s or '').strip() or (e or '').strip() or FONT_PREVIEW_SAMPLE),
+            inputs=[text_font, start_text, end_text], outputs=[text_font_preview],
         )
 
         audio_input.change(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])

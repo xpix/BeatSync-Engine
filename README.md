@@ -73,8 +73,19 @@ on top of the upstream engine. All new UI fields are labelled in German.
 
 *   Optional burned-in **Start-Text** and **End-Text** titles with 9 position presets
     (corners, edges, centre) and an independent on-screen duration per title.
-*   Rendered with `add_text_overlays_ffmpeg` via the bundled Arial font (white text, black border);
-    the re-encode is ProRes/NVENC/CPU-aware and keeps the audio stream.
+*   **Selectable font** ("🔤 Schriftart") from the installed Windows fonts (Arial, Impact,
+    Bahnschrift, Georgia, …) with a live browser preview card that renders your actual text
+    in the chosen face.
+*   **Auto-sized text:** the font size is derived from the output resolution and title
+    length so a short title fills roughly a third of the frame (with a generous floor and
+    an overflow cap), instead of the old fixed `fontsize=48`. Outline width scales with it.
+*   **Opening / closing fade** ("🎬 Ein-/Ausblenden (Schwarzblende)"): fade the video and
+    audio up from black at the start and down to black at the end over an adjustable
+    duration. The `fade` filters run *after* `drawtext`, so a start/end title is dimmed by
+    the same ramp — it fades up out of the opening blende and down into the closing one
+    instead of just cutting on/off.
+*   Rendered with `add_text_overlays_ffmpeg` (white text, black outline); the re-encode is
+    ProRes/NVENC/CPU-aware.
 
 ### ✂️ Edge buffer ("Rand-Puffer")
 
@@ -106,6 +117,10 @@ on top of the upstream engine. All new UI fields are labelled in German.
     `_enforce_pinned_endpoints` pass rewrites the first/last clip if every earlier stage
     dropped the pin (e.g. the source was already consumed), so an explicit pin is not
     silently ignored.
+*   When a dropped pin is repaired and the very first/last beat cut is a fast one, the
+    pin is stretched across the following/preceding segments until it has been on screen
+    for at least `PIN_MIN_VISIBLE_SECONDS` (1.5 s, capped at `PIN_MAX_SEGMENTS`), so the
+    pinned clip is actually recognizable instead of flashing by.
 
 ### ⚡ Performance
 
