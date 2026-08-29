@@ -99,7 +99,7 @@ def _image_loop_cache_key(source_file: str, duration: float, fps: float,
 
 
 def prepare_visual_sources(source_files: Sequence[str], audio_duration: float, fps: float,
-                           working_dir: str, edge_buffer_seconds: float = 5.0,
+                           working_dir: str, edge_buffer_seconds: float = 2.0,
                            use_nvenc: bool = False, gpu_encoder: str = 'h264_nvenc',
                            lossless: bool = False, target_size: Tuple[int, int] | None = None,
                            debug_callback: Callable[[str], None] | None = None) -> List[str]:
@@ -275,8 +275,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--edge-buffer-seconds',
         type=float,
-        default=5.0,
-        help='Seconds ignored at the start/end of each source video when picking clips (default: 5.0)'
+        default=2.0,
+        help='Seconds ignored at the start/end of each source video when picking clips (default: 2.0)'
     )
     parser.add_argument(
         '--clip-order-mode',
@@ -467,7 +467,7 @@ def _build_non_overlapping_fallback_sequence(
     segment_durations: Sequence[float],
     video_files: Sequence[str],
     preferred_videos: Sequence[str] = (),
-    edge_buffer_seconds: float = 5.0,
+    edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
     last_video: str | None = None,
@@ -572,7 +572,7 @@ def _build_legacy_random_fallback_sequence(
     segment_durations: Sequence[float],
     video_files: Sequence[str],
     preferred_videos: Sequence[str] = (),
-    edge_buffer_seconds: float = 5.0,
+    edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
     last_video: str | None = None,
@@ -679,7 +679,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       gpu_encoder: str = 'h264_nvenc', fps: float = None,
                       strict_unique_non_overlap: bool = True,
                       preferred_videos: Sequence[str] = (),
-                      edge_buffer_seconds: float = 5.0,
+                      edge_buffer_seconds: float = 2.0,
                       clip_order_mode: str = "auto",
                       first_video: str | None = None,
                       last_video: str | None = None,

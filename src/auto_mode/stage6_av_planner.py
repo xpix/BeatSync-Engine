@@ -87,6 +87,69 @@ def _effective_edge_buffer(video_file: str, edge_buffer_seconds: float) -> float
     return 0.0 if _is_image_loop_video(video_file) else edge_buffer_seconds
 
 
+def _forced_pin_clip(
+    forced_video: str,
+    profile: Dict,
+    index: int,
+    candidates: Sequence[Dict],
+    occupied_ranges: Dict[str, List[tuple[float, float]]],
+    edge_buffer_seconds: float,
+    anchor: str,
+) -> Dict | None:
+    """Pin `forced_video` (Start-/End-Video) to this segment using the source's full
+    duration rather than a single detected scene window.
+
+    The normal candidate path only succeeds when a Qwen/heuristic scene detected
+    inside the pinned video happens to be long enough -- and positioned correctly --
+    to cover the segment's exact cut duration. That is frequently not the case for
+    the very first/last cut, which silently drops the pin. This instead treats the
+    whole (edge-buffered) source video as the usable window, so the pin is honored
+    whenever the source is simply long enough: anchored at its very start for the
+    first segment, or its very end for the last segment.
+    """
+    video_duration = None
+    for c in candidates:
+        if str(c.get("video_file") or "") == forced_video:
+            vd = c.get("video_duration")
+            if vd:
+                video_duration = float(vd)
+                break
+    if not video_duration or video_duration <= 0:
+        return None
+
+    source_duration = max(0.05, float(profile.get("duration", 0.05)))
+    effective_buffer = _effective_edge_buffer(forced_video, edge_buffer_seconds)
+    allowed_lo, allowed_hi = _buffered_start_bounds(video_duration, source_duration, effective_buffer)
+    region_end = allowed_hi + source_duration
+    if region_end - allowed_lo < source_duration:
+        return None
+
+    preferred_start = allowed_lo if anchor == "start" else allowed_hi
+    occupied = occupied_ranges.get(forced_video, [])
+    start_time = _pick_start_from_available_gaps(allowed_lo, region_end, source_duration, occupied, preferred_start)
+    if start_time is None:
+        return None
+
+    candidate_id = f"forced_{anchor}_{index:05d}_{int(start_time * 1000):08d}"
+    return {
+        "index": index,
+        "video_file": forced_video,
+        "source_name": os.path.basename(forced_video),
+        "start_time": start_time,
+        "source_duration": source_duration,
+        "final_duration": source_duration,
+        "target": profile.get("target", "flow"),
+        "score": 0.0,
+        "candidate_id": candidate_id,
+        "tags": ["forced_pin"],
+        "ai_analyzed": False,
+        "audio_start": profile.get("start"),
+        "audio_end": profile.get("end"),
+        "wave": profile.get("wave"),
+        "impact": profile.get("impact"),
+    }
+
+
 def build_planned_clip_sequence(
     cut_times: Sequence[float],
     segment_durations: Sequence[float],
@@ -94,7 +157,7 @@ def build_planned_clip_sequence(
     video_files: Sequence[str],
     strict_unique_non_overlap: bool = True,
     preferred_videos: Sequence[str] = (),
-    edge_buffer_seconds: float = 5.0,
+    edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
     last_video: str | None = None,
@@ -169,6 +232,32 @@ def build_planned_clip_sequence(
                 preferred_videos=preferred_set,
                 edge_buffer_seconds=edge_buffer_seconds,
             ) if pool else None
+            if planned_clip is None:
+                # No single detected scene in the pinned source was long enough (or
+                # positioned right) to cover this segment. Pin against the source's
+                # full duration instead of a specific scene window, so Start-/End-
+                # Video is still honored rather than silently falling through to
+                # normal (unpinned) selection.
+                pin_anchor = "start" if i == 0 else "end"
+                planned_clip = _forced_pin_clip(
+                    forced_video=forced_video,
+                    profile=profile,
+                    index=i,
+                    candidates=candidates,
+                    occupied_ranges=occupied_ranges,
+                    edge_buffer_seconds=edge_buffer_seconds,
+                    anchor=pin_anchor,
+                )
+                if planned_clip is None:
+                    pin_warning = (
+                        f"Start/End-Video pin could not be honored for segment {i} "
+                        f"({os.path.basename(forced_video)}): source too short for this "
+                        f"cut after the edge buffer, or not part of the analyzed video "
+                        f"library. Falling back to normal selection for this segment."
+                    )
+                    print(f"   \u26a0\ufe0f  {pin_warning}", flush=True)
+                    if debug_callback:
+                        debug_callback(f"Warning: {pin_warning}")
         if planned_clip is None and video_order:
             planned_clip = _select_ordered_segment(
                 candidates=available_candidates,

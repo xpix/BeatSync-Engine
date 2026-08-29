@@ -368,7 +368,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
                        video_folder_path: str = '',
                        preferred_videos: VideoFilesInput | None = None,
-                       edge_buffer_seconds: float = 5.0,
+                       edge_buffer_seconds: float = 2.0,
                        clip_order_mode: str = 'auto',
                        first_video: str | None = None,
                        last_video: str | None = None,
@@ -501,7 +501,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             use_gpu=use_gpu, gpu_encoder=gpu_encoder, fps=output_fps,
             strict_unique_non_overlap=bool(strict_unique_non_overlap),
             preferred_videos=_as_existing_source_paths(preferred_videos),
-            edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 5.0,
+            edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 2.0,
             clip_order_mode=clip_order_mode or 'auto',
             first_video=_as_existing_source_path(first_video),
             last_video=_as_existing_source_path(last_video),
@@ -578,7 +578,7 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                  custom_fps: float, strict_unique_non_overlap: bool,
                  session_state: dict, video_folder_path: str = '',
                  preferred_videos: VideoFilesInput | None = None,
-                 edge_buffer_seconds: float = 5.0,
+                 edge_buffer_seconds: float = 2.0,
                  clip_order_mode: str = 'auto',
                  first_video: str | None = None,
                  last_video: str | None = None,
@@ -902,7 +902,7 @@ def create_ui() -> gr.Blocks:
                         label='Strict Clip Mode',
                         info='Uses each selected source segment only once and prevents overlap inside the same source video.'
                     )
-                    edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=5.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
+                    edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=2.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
                     clip_order_mode = gr.Radio(
                         choices=[('🤖 Automatisch (KI-Auswahl)', 'auto'), ('📅 Chronologisch (Aufnahmedatum)', 'chronological'), ('🔤 Alphabetisch (Dateiname)', 'name')],
                         value='auto', label=LABEL_CLIP_ORDER_MODE, info=INFO_CLIP_ORDER_MODE
