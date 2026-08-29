@@ -13,13 +13,16 @@ import numpy as np
 
 try:
     # src/ is on sys.path once the auto_mode package is imported (see __init__.py).
-    from media_time import get_recording_timestamp
+    from media_time import get_recording_timestamp, get_capture_timestamp
 except Exception:  # pragma: no cover - fallback if imported in isolation
     def get_recording_timestamp(path: str, fallback_to_mtime: bool = True) -> float:
         try:
             return os.path.getmtime(path)
         except OSError:
             return float("inf")
+
+    def get_capture_timestamp(path: str):
+        return None
 
 CLIP_ORDER_MODES = ("auto", "chronological", "name")
 
@@ -57,6 +60,26 @@ def _sorted_unique_videos(candidates: Sequence[Dict], clip_order_mode: str) -> L
         # Real capture time (EXIF / container metadata); file mtime only as fallback.
         videos.sort(key=lambda v: (get_recording_timestamp(v), os.path.basename(v).lower()))
     return videos
+
+
+def _log_source_order(video_order: Sequence[str], clip_order_mode: str, debug_callback) -> None:
+    """Emit the resolved source order so a 'that can't be chronological' result is checkable."""
+    import datetime as _dt
+
+    debug_callback(f"Source order ({clip_order_mode}), clips are drawn round-robin in this order:")
+    for pos, video in enumerate(video_order, 1):
+        name = os.path.basename(video)
+        if clip_order_mode != "chronological":
+            debug_callback(f"  {pos}. {name}")
+            continue
+        capture = get_capture_timestamp(video)
+        used = get_recording_timestamp(video)
+        origin = "capture metadata" if capture else "file mtime (no capture metadata)"
+        try:
+            stamp = _dt.datetime.fromtimestamp(used).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            stamp = "unknown"
+        debug_callback(f"  {pos}. {name} — {stamp} ({origin})")
 
 
 def _forced_segment_videos(segment_count: int, first_video: str | None, last_video: str | None) -> Dict[int, str]:
@@ -208,6 +231,8 @@ def build_planned_clip_sequence(
     occupied_ranges: Dict[str, List[tuple[float, float]]] = {}
     planned_by_index: Dict[int, Dict] = {}
     video_order = _sorted_unique_videos(candidates, clip_order_mode)
+    if debug_callback and clip_order_mode in ("chronological", "name") and video_order:
+        _log_source_order(video_order, clip_order_mode, debug_callback)
     active_video_idx = [0]
     exhausted_ordered_videos: set[str] = set()
     forced_segment_videos = _forced_segment_videos(len(profiles), first_video, last_video)

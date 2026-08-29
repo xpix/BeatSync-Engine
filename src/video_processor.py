@@ -435,7 +435,12 @@ def create_clip_parallel(args):
         temp_clip_path = os.path.join(temp_dir, f"temp_clip_{i}_{uuid.uuid4().hex}.mp4")
 
         if debug_callback:
-            debug_callback(f"Clip {i + 1}: {os.path.basename(video_file)} @ {clip_start:.1f}s")
+            # Extraction runs in parallel, so these lines are NOT emitted in timeline
+            # order -- the "Clip N" index is the position in the final cut sequence.
+            debug_callback(
+                f"Clip {i + 1} (timeline pos {i + 1}): {os.path.basename(video_file)} "
+                f"— cut from {clip_start:.1f}s into the source"
+            )
 
         extract_kwargs = {
             'video_file': video_file,
