@@ -47,6 +47,99 @@ BeatSync Engine analyzes music rhythm, energy, sections, and source-video moment
 
 ---
 
+## 🔧 Fork Changes (vs. `Merserk/BeatSync-Engine`)
+
+This fork adds source-material flexibility, clip-selection controls, and title overlays
+on top of the upstream engine. All new UI fields are labelled in German.
+
+### 🖼️ Still image sources
+
+*   Upload `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`, `.heic`, or `.heif` next to (or instead of)
+    video files. HEIC/HEIF depends on the bundled FFmpeg build.
+*   Each image is decoded once and turned into a silent CFR MP4 loop
+    (`create_looping_image_video` in `ffmpeg_processing.py`) that is cut to the music like any clip.
+*   Generated loops are cached persistently in `input/image_loop_cache/`
+    (new `IMAGE_LOOP_CACHE_DIR` / `get_image_loop_cache_dir()` in `paths.py`).
+*   Loops are scaled to the final output resolution up front and can be NVENC-encoded,
+    so multi-megapixel frames are never pushed through the encoder for the whole song length.
+*   Static photo loops skip the edge buffer entirely (no unstable start/end to trim).
+
+### 📂 Local video folder input
+
+*   New **"Lokaler Videoordner"** field: point at a folder of videos/images already on disk to
+    skip the browser upload. Much faster for large files and takes priority over uploaded files.
+
+### 📝 Start / end text overlays
+
+*   Optional burned-in **Start-Text** and **End-Text** titles with 9 position presets
+    (corners, edges, centre) and an independent on-screen duration per title.
+*   Rendered with `add_text_overlays_ffmpeg` via the bundled Arial font (white text, black border);
+    the re-encode is ProRes/NVENC/CPU-aware and keeps the audio stream.
+
+### ✂️ Edge buffer ("Rand-Puffer")
+
+*   New **"Rand-Puffer (Sekunden)"** option: ignore N seconds at the start and end of every
+    source video when picking clips, threaded through `video_processor.py` and `stage6_av_planner.py`.
+*   Image loops are exempt from the buffer.
+*   **Default changed from `5.0 s` to `2.0 s`** across the GUI, CLI (`--edge-buffer-seconds`),
+    and pipeline function signatures.
+
+### ⭐ Preferred videos
+
+*   New **"Bevorzugte Videos"** multi-select: marked sources are weighted higher and
+    contribute more clips to the finished video.
+
+### 🔀 Clip order mode
+
+*   New **"Clip-Reihenfolge"** radio:
+    *   🤖 **Automatisch** – AI/editorial selection (default, upstream behaviour).
+    *   📅 **Chronologisch** – source videos used in recording / file-modified-time order.
+    *   🔤 **Alphabetisch** – source videos used in filename order.
+*   Sequential modes fill each source completely before moving to the next one.
+
+### ⏮️⏭️ First / last video pinning
+
+*   New **"Start-Video"** and **"End-Video"** dropdowns force which source supplies the very
+    first and very last clip, honoured even when the planner falls back to a non-overlapping
+    or random sequence.
+*   Image pins are remapped onto their generated loop video, and a final
+    `_enforce_pinned_endpoints` pass rewrites the first/last clip if every earlier stage
+    dropped the pin (e.g. the source was already consumed), so an explicit pin is not
+    silently ignored.
+
+### ⚡ Performance
+
+Turning still images into song-length sources was the main bottleneck this fork removes;
+overall throughput on image-heavy projects is **dramatically faster** than a naive convert-every-run approach.
+
+*   **GPU encoding for image loops:** when a GPU + NVENC are available, per-image loop videos are
+    hardware-encoded (`h264_nvenc` / HEVC) instead of `libx264`.
+*   **Persistent loop cache:** generated loops are stored in `input/image_loop_cache/` under a key
+    hashed from source content + fps + target size + encoder + a cache version. A rerun or restart
+    **reuses the existing loop instead of re-encoding it** ("🖼️ Reusing cached image video …").
+*   **Scale-first, decode-once:** images are scaled to the final output resolution *before* encoding
+    (no multi-megapixel frames through the filter graph) and expensive formats (HEIC/WebP) are
+    decoded a single time to PNG rather than re-decoded on every looped frame.
+*   **Minimal loop length:** a photo loop is only made long enough for the edge-buffer math to stay
+    valid, not the full song length, so far less data is encoded and cut.
+*   Deterministic visual-analysis caching (upstream) is now visible in the UI console, so cache
+    hits vs. fresh analysis are easy to confirm.
+
+### 🩹 Other fixes
+
+*   **Aspect ratio:** portrait (and any non-matching) images and videos are now letter-/pillar-boxed
+    into the output frame instead of being stretched to 16:9. A shared `build_fit_scale_filter`
+    helper (`scale=…:force_original_aspect_ratio=decrease` + `pad` + `setsar=1`) is used by both the
+    image-loop builder and the per-clip extractor.
+*   Per-file analysis progress ("Analyzing / Cached / Qwen tagging …") is now forwarded to the
+    UI console via a `debug_callback` plumbed through `analyze_beats_auto` → `analyze_video_sources`.
+*   `stage5_qwen_scene_worker.py` resolves `ROOT_DIR` with an explicit `os.path` chain instead of
+    `Path.parents[2]` for more reliable portable-runtime path resolution.
+*   Fallback clip-sequence logic checks for non-empty segment durations before pinning the last video.
+*   Added `.gitignore` for `__pycache__` directories.
+
+---
+
 ## 📦 Portable Folder Layout
 
 A complete portable release is expected to look like this:
@@ -85,6 +178,7 @@ BeatSync Engine/
 │   ├── video/                               # Latest uploaded source videos
 │   ├── processing/                          # Temporary processing files
 │   ├── gradio_uploads/                      # Gradio upload/session temp files
+│   ├── image_loop_cache/                    # Cached per-image loop videos (fork)
 │   └── video_analysis_cache/                # Visual analysis cache
 └── output/                                  # Final exported videos
 ```

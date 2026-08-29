@@ -219,6 +219,21 @@ def get_video_resolution(video_file: str) -> Tuple[int, int]:
         return (1920, 1080)  # Default fallback
 
 
+def build_fit_scale_filter(width: int, height: int, color: str = "black") -> str:
+    """Scale a source into ``width`` x ``height`` while keeping its aspect ratio.
+
+    Portrait or otherwise non-matching sources are letter-/pillar-boxed with
+    ``color`` bars instead of being stretched to fill the frame. ``setsar=1``
+    keeps the output pixel-square so later concat/encode steps stay consistent.
+    """
+    width = int(width)
+    height = int(height)
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={color},setsar=1"
+    )
+
+
 def create_looping_image_video(image_file: str, output_file: str, duration: float,
                                fps: float, use_nvenc: bool = False,
                                gpu_encoder: str = 'h264_nvenc', lossless: bool = False,
@@ -228,7 +243,11 @@ def create_looping_image_video(image_file: str, output_file: str, duration: floa
     fps = max(1.0, float(fps))
     # Scale to the final output size now (not the native photo resolution) so we don't
     # push multi-megapixel frames through the filter/encoder for the whole song length.
-    scale_filter = f"scale={target_size[0]}:{target_size[1]}" if target_size else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    # Portrait / non-16:9 photos are letterboxed, never stretched.
+    scale_filter = (
+        build_fit_scale_filter(target_size[0], target_size[1]) if target_size
+        else "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+    )
 
     # HEIC/WebP/etc. can be very expensive to re-decode on every looped frame with
     # some FFmpeg builds. Decode the source once to a plain PNG and loop that instead.
@@ -438,10 +457,11 @@ def extract_clip_segment_ffmpeg(video_file: str, start_time: float, duration: fl
         # Trim first so each extracted segment has exact timing.
         filters.extend([f"trim=duration={exact_source_duration}", "setpts=PTS-STARTPTS"])
         
-        # Scale to target size
+        # Scale to target size, keeping aspect ratio (portrait sources get
+        # letter-/pillar-boxed instead of stretched to 16:9).
         if target_size:
             width, height = target_size
-            filters.append(f"scale={width}:{height}")
+            filters.append(build_fit_scale_filter(width, height))
         
         # FPS filter
         filters.append(f"fps={fps}")

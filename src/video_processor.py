@@ -74,7 +74,7 @@ def is_image_loop_video(file_path: str) -> bool:
 
 # Bump when create_looping_image_video()'s output would change for the same inputs,
 # so stale cache entries from a previous version get regenerated instead of reused.
-IMAGE_LOOP_CACHE_VERSION = "v1"
+IMAGE_LOOP_CACHE_VERSION = "v2"  # v2: aspect-preserving letterbox instead of 16:9 stretch
 
 
 def _image_loop_cache_key(source_file: str, duration: float, fps: float,
@@ -670,6 +670,74 @@ def _build_legacy_random_fallback_sequence(
     return planned
 
 
+def _enforce_pinned_endpoints(planned_clip_sequence, video_files, first_video, last_video,
+                              edge_buffer_seconds, debug_callback=None):
+    """Guarantee the first/last output clip really comes from the pinned Start-/End-Video.
+
+    The AV planner and its fallbacks can silently drop a pin when the pinned source
+    was already consumed elsewhere, or has no non-overlapping scene matching that exact
+    cut. A user pin is explicit intent, so as a final step we rewrite just that one clip
+    to the pinned source, anchored at the source's start (first clip) or end (last clip).
+    """
+    if not planned_clip_sequence:
+        return planned_clip_sequence
+
+    known_sources = {os.path.abspath(str(v)) for v in (video_files or ()) if v}
+    targets = []
+    if first_video:
+        targets.append((0, os.path.abspath(str(first_video)), "start"))
+    if last_video:
+        targets.append((len(planned_clip_sequence) - 1, os.path.abspath(str(last_video)), "end"))
+
+    for idx, pinned, anchor in targets:
+        if idx < 0 or idx >= len(planned_clip_sequence) or pinned not in known_sources:
+            continue
+        clip = planned_clip_sequence[idx]
+        if os.path.abspath(str(clip.get("video_file") or "")) == pinned:
+            continue  # planner already honored the pin
+
+        seg_duration = max(0.05, float(clip.get("final_duration") or clip.get("source_duration") or 0.05))
+        try:
+            src_duration = max(0.0, float(get_video_duration(pinned)))
+        except Exception:
+            src_duration = 0.0
+        if src_duration + 1e-3 < seg_duration:
+            warn = (f"{'Start' if anchor == 'start' else 'End'}-Video pin could not be enforced for the "
+                    f"{'first' if anchor == 'start' else 'last'} clip: {os.path.basename(pinned)} is shorter "
+                    f"than the {seg_duration:.2f}s cut.")
+            print(f"   ⚠️  {warn}", flush=True)
+            if debug_callback:
+                debug_callback(f"Warning: {warn}")
+            continue
+
+        buffer = 0.0 if is_image_loop_video(pinned) else max(0.0, float(edge_buffer_seconds))
+        latest_start = max(0.0, src_duration - seg_duration)
+        if anchor == "start":
+            start_time = min(buffer, latest_start)
+        else:
+            start_time = max(min(buffer, latest_start), latest_start - buffer)
+
+        new_clip = dict(clip)
+        new_clip.update({
+            "video_file": pinned,
+            "source_name": os.path.basename(pinned),
+            "start_time": start_time,
+            "source_duration": seg_duration,
+            "final_duration": seg_duration,
+            "candidate_id": f"pinned_{anchor}_{idx:05d}",
+            "tags": sorted(set((clip.get("tags") or []) + ["forced_pin"])),
+            "ai_analyzed": False,
+        })
+        planned_clip_sequence[idx] = new_clip
+        msg = (f"{'Start' if anchor == 'start' else 'End'}-Video pin enforced: clip {idx} -> "
+               f"{os.path.basename(pinned)} @ {start_time:.2f}s")
+        print(f"   \U0001f4cc {msg}", flush=True)
+        if debug_callback:
+            debug_callback(msg)
+
+    return planned_clip_sequence
+
+
 def create_music_video(audio_file: str, video_files: VideoList, beat_times: BeatTimes,
                       output_file: str = 'output_music_video.mkv',
                       start_time: float = 0.0, end_time: float = None,
@@ -854,6 +922,13 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                 segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
                 clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
             )
+
+    # Last-resort guarantee: whichever path built the plan, make sure the very first/last
+    # clip really is the pinned Start-/End-Video if one was requested.
+    planned_clip_sequence = _enforce_pinned_endpoints(
+        planned_clip_sequence, video_files, first_video, last_video,
+        edge_buffer_seconds, debug_callback=debug_callback,
+    )
 
     if planned_clip_sequence:
         plan_summary = summarize_clip_plan(planned_clip_sequence)

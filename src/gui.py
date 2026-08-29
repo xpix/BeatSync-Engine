@@ -463,11 +463,31 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         audio_duration = get_video_duration(local_audio_path)
         image_source_dir = os.path.join(session_dir, 'image_sources')
         debug_callback = console_logger.debug if console_logger else None
+        pre_conversion_paths = list(local_video_paths)
         local_video_paths = prepare_visual_sources(
             local_video_paths, audio_duration, output_fps, image_source_dir, edge_buffer_seconds,
             use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores, target_size=target_resolution,
             debug_callback=debug_callback,
         )
+
+        # prepare_visual_sources() swaps still images for generated loop videos (same
+        # order/length). Remap the Start-/End-/preferred-video pins onto those new paths
+        # so an image pin still matches an entry in the analyzed source library.
+        _source_path_remap = {
+            _as_existing_source_path(old): new
+            for old, new in zip(pre_conversion_paths, local_video_paths)
+            if _as_existing_source_path(old)
+        }
+
+        def _remap_pin(pin: str | None) -> str | None:
+            resolved = _as_existing_source_path(pin)
+            return _source_path_remap.get(resolved, resolved)
+
+        first_video = _remap_pin(first_video)
+        last_video = _remap_pin(last_video)
+        preferred_videos = [
+            _remap_pin(p) for p in (preferred_videos or []) if _remap_pin(p)
+        ]
             
         # Prepare output paths
         output_folder = get_output_dir()
