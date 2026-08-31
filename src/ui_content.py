@@ -339,7 +339,12 @@ LABEL_CLIP_ORDER_MODE = "🔀 Clip order"
 INFO_CLIP_ORDER_MODE = (
     "Sets the order in which the source videos are used in the final video. "
     "Chronological uses the real capture date from the EXIF/container metadata; "
-    "if it is missing, the file modification date is used instead."
+    "if it is missing, the file modification date is used instead. "
+    "Journey plays footage and photos together strictly forward in capture-time "
+    "order and never revisits an earlier moment, so the trip only moves forward — "
+    "a photo taken between two clips appears between them (photos without a capture "
+    "date are spread evenly), and if the footage for a beat runs out the previous "
+    "shot is held rather than looping back to the start."
 )
 
 LABEL_FIRST_VIDEO = "⏮️ First video"

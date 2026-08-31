@@ -73,6 +73,23 @@ def is_image_loop_video(file_path: str) -> bool:
     return os.path.basename(str(file_path)).startswith("image_source_")
 
 
+def build_image_capture_time_map(pre_paths: Sequence[str], post_paths: Sequence[str]) -> Dict[str, float]:
+    """{generated image-loop path -> real capture timestamp of the original photo}.
+
+    prepare_visual_sources() swaps each still image for an ``image_source_*`` loop at
+    the same list position, so zipping the before/after lists recovers the original.
+    Used by the "journey" clip order to slot photos in chronologically.
+    """
+    mapping: Dict[str, float] = {}
+    for original, prepared in zip(pre_paths, post_paths):
+        if is_image_source(original) and is_image_loop_video(prepared):
+            try:
+                mapping[str(prepared)] = float(get_recording_timestamp(original))
+            except Exception:
+                pass
+    return mapping
+
+
 # Bump when create_looping_image_video()'s output would change for the same inputs,
 # so stale cache entries from a previous version get regenerated instead of reused.
 IMAGE_LOOP_CACHE_VERSION = "v2"  # v2: aspect-preserving letterbox instead of 16:9 stretch
@@ -282,11 +299,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--clip-order-mode',
         type=str,
-        choices=['auto', 'chronological', 'name'],
+        choices=['auto', 'chronological', 'name', 'journey'],
         default='auto',
         help='Order source videos appear in the output: auto (AI editorial selection), '
              'chronological (by real capture date from EXIF/container metadata, '
-             'falling back to file modified time), or name (alphabetical filename) (default: auto)'
+             'falling back to file modified time), name (alphabetical filename), or '
+             'journey (forward-only chronological: footage never revisits an earlier '
+             'source moment; stills spread evenly and may repeat) (default: auto)'
     )
     parser.add_argument(
         '--first-video',
@@ -330,7 +349,7 @@ def _sort_video_files(video_files: Sequence[str], clip_order_mode: str) -> List[
     files = [str(f) for f in video_files]
     if clip_order_mode == "name":
         files.sort(key=lambda f: os.path.basename(f).lower())
-    elif clip_order_mode == "chronological":
+    elif clip_order_mode in ("chronological", "journey"):
         # Real capture time (EXIF / container metadata); file mtime only as fallback.
         files.sort(key=lambda f: (get_recording_timestamp(f), os.path.basename(f).lower()))
     return files
@@ -523,7 +542,7 @@ def _build_non_overlapping_fallback_sequence(
     """
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
     preferred_set = {str(p) for p in preferred_videos if p}
-    sequential_fill = clip_order_mode in ("chronological", "name")
+    sequential_fill = clip_order_mode in ("chronological", "name", "journey")
     if sequential_fill:
         video_files = _sort_video_files(video_files, clip_order_mode)
     sources: List[Dict[str, float | str]] = []
@@ -626,7 +645,7 @@ def _build_legacy_random_fallback_sequence(
 
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
     preferred_set = {str(p) for p in preferred_videos if p}
-    sequential = clip_order_mode in ("chronological", "name")
+    sequential = clip_order_mode in ("chronological", "name", "journey")
     ordered_files = _sort_video_files(video_files, clip_order_mode) if sequential else list(video_files)
     weights = [4.0 if str(f) in preferred_set else 1.0 for f in ordered_files]
 
@@ -840,6 +859,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       fade_in_seconds: float = 0.0,
                       fade_out_seconds: float = 0.0,
                       planned_clip_sequence: Sequence[Dict] | None = None,
+                      image_capture_times: Dict[str, float] | None = None,
                       debug_callback: Callable[[str], None] | None = None) -> str:
     """
     Creates a music video with video clips cut to detected beats.
@@ -1000,6 +1020,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
             clip_order_mode=clip_order_mode,
             first_video=first_video,
             last_video=last_video,
+            image_capture_times=image_capture_times,
             debug_callback=debug_callback,
         )
         if not planned_clip_sequence:
@@ -1376,11 +1397,13 @@ def main() -> None:
         audio_duration -= args.start_time
     image_source_dir = tempfile.mkdtemp(prefix='beatsync_image_sources_')
     use_nvenc_for_images = args.gpu and NVENC_AVAILABLE and not args.lossless and args.gpu_encoder != 'none'
+    pre_conversion_paths = list(video_files)
     video_files = prepare_visual_sources(
         video_files, audio_duration, fps_for_images, image_source_dir, args.edge_buffer_seconds,
         use_nvenc=use_nvenc_for_images, gpu_encoder=args.gpu_encoder, lossless=args.lossless,
         target_size=target_resolution,
     )
+    image_capture_times = build_image_capture_time_map(pre_conversion_paths, video_files)
  
     print(f"🤖 Using AUTO mode")
     selected_beats, beat_info = analyze_beats_auto(
@@ -1422,6 +1445,7 @@ def main() -> None:
         clip_order_mode=args.clip_order_mode,
         first_video=args.first_video,
         last_video=args.last_video,
+        image_capture_times=image_capture_times,
         target_resolution=target_resolution,
     )
  

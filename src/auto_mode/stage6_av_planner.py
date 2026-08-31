@@ -24,7 +24,13 @@ except Exception:  # pragma: no cover - fallback if imported in isolation
     def get_capture_timestamp(path: str):
         return None
 
-CLIP_ORDER_MODES = ("auto", "chronological", "name")
+CLIP_ORDER_MODES = ("auto", "chronological", "name", "journey")
+
+# "journey" mode tunables.
+JOURNEY_IMAGE_FRACTION = 0.45       # stills may take at most this share of segments (extras are dropped, keeping chronology)
+JOURNEY_SOURCE_BONUS_CAP = 2.5      # a long source may hold at most this * the even per-source budget
+JOURNEY_MAX_HOLD_SEGMENTS = 1       # extra beats a footage shot may flow across before a still takes over
+_MIN_PLAUSIBLE_TS = 315532800.0     # 1980-01-01; anything earlier counts as "no real capture date"
 
 
 def _clamp(value, lo: float = 0.0, hi: float = 1.0, default: float = 0.0) -> float:
@@ -190,6 +196,7 @@ def build_planned_clip_sequence(
     clip_order_mode: str = "auto",
     first_video: str | None = None,
     last_video: str | None = None,
+    image_capture_times: Dict[str, float] | None = None,
     debug_callback=None,
 ) -> List[Dict]:
     """Build exact source clip choices for every output segment.
@@ -224,6 +231,32 @@ def build_planned_clip_sequence(
         return []
 
     profiles = _build_segment_profiles(cut_times_arr, durations_arr, beat_info)
+
+    if clip_order_mode == "journey":
+        journey = _build_journey_sequence(
+            profiles=profiles,
+            candidates=candidates,
+            edge_buffer_seconds=edge_buffer_seconds,
+            preferred_videos=preferred_set,
+            first_video=first_video,
+            last_video=last_video,
+            image_capture_times=image_capture_times,
+            debug_callback=debug_callback,
+        )
+        if journey and len(journey) == len(profiles):
+            if debug_callback:
+                sources = len({c.get("video_file") for c in journey})
+                holds = sum(1 for c in journey if "journey_hold" in (c.get("tags") or []))
+                stills = sum(1 for c in journey if _is_image_loop_video(str(c.get("video_file") or "")))
+                debug_callback(
+                    f"Journey plan: {len(journey)} clips forward-chronological, "
+                    f"{sources} sources, {stills} stills, {holds} held beats"
+                )
+            return journey
+        if debug_callback:
+            debug_callback("Journey mode: no usable clip plan built; using standard fallback")
+        return []
+
     recent_ids = deque(maxlen=10)
     recent_videos = deque(maxlen=5)
     usage = Counter()
@@ -395,6 +428,306 @@ def build_planned_clip_sequence(
     if len(planned) != len(durations_arr):
         return []
     return planned
+
+
+def _source_usable_seconds(cands: Sequence[Dict], edge_buffer_seconds: float) -> float:
+    """Union length of a source's candidate windows, clamped to the edge-buffered bounds."""
+    if not cands:
+        return 0.0
+    video_file = str(cands[0].get("video_file") or "")
+    video_duration = float(cands[0].get("video_duration") or 0.0)
+    buffer = _effective_edge_buffer(video_file, edge_buffer_seconds)
+    lo = min(buffer, max(0.0, video_duration))
+    hi = video_duration if _is_image_loop_video(video_file) else max(lo, video_duration - buffer)
+    spans: List[tuple[float, float]] = []
+    for c in cands:
+        s = max(lo, float(c.get("start", 0.0)))
+        e = min(hi, float(c.get("end", 0.0)))
+        if e > s:
+            spans.append((s, e))
+    spans.sort()
+    total = 0.0
+    covered_end = -1.0
+    for s, e in spans:
+        if s > covered_end:
+            total += e - s
+            covered_end = e
+        elif e > covered_end:
+            total += e - covered_end
+            covered_end = e
+    return total
+
+
+def _journey_forward_start(
+    cands_sorted: Sequence[Dict],
+    profile: Dict,
+    cursor: float,
+    edge_buffer_seconds: float,
+) -> tuple[Dict, float] | None:
+    """Earliest candidate window at or after `cursor` that can supply this segment."""
+    source_duration = max(0.05, float(profile.get("duration", 0.05)))
+    best: tuple[Dict, float] | None = None
+    for candidate in cands_sorted:
+        if float(candidate.get("end", 0.0)) - cursor < source_duration - 1e-9:
+            continue
+        video_file = str(candidate.get("video_file") or "")
+        start = _select_non_overlapping_start(
+            candidate, profile, {video_file: [(0.0, cursor)]}, edge_buffer_seconds
+        )
+        if start is None or start + 1e-6 < cursor:
+            continue
+        if best is None or start < best[1]:
+            best = (candidate, start)
+        if best is not None and float(candidate.get("start", 0.0)) > cursor + 3.0 * source_duration:
+            break
+    return best
+
+
+def _journey_best_still(cands: Sequence[Dict], profile: Dict) -> Dict | None:
+    best = None
+    best_score = -9.0
+    for candidate in cands:
+        score = _score_candidate(candidate, profile)
+        if score > best_score:
+            best_score = score
+            best = candidate
+    return best
+
+
+def _largest_remainder(weights: Sequence[float], total: int) -> List[int]:
+    """Integer split of `total` across `weights` (Hamilton method); sums to `total`."""
+    total = max(0, int(total))
+    if not weights or total == 0:
+        return [0] * len(weights)
+    s = float(sum(weights)) or 1.0
+    exact = [total * w / s for w in weights]
+    base = [int(x) for x in exact]
+    for j in sorted(range(len(weights)), key=lambda i: exact[i] - base[i], reverse=True)[: total - sum(base)]:
+        base[j] += 1
+    return base
+
+
+def _journey_chapter_counts(
+    chapters: Sequence[Dict], n: int, budget: Dict[str, float]
+) -> List[int]:
+    """How many output segments each ordered chapter gets.
+
+    Every kept still-image chapter gets one segment; footage chapters split the rest
+    by their per-source budget (>= 1 each when there is room). If there are more
+    photos than ``JOURNEY_IMAGE_FRACTION`` of the timeline, the surplus is thinned
+    out evenly so their chronological order is kept.
+    """
+    counts = [0] * len(chapters)
+    img_idx = [k for k, c in enumerate(chapters) if c["kind"] == "image"]
+    foot_idx = [k for k, c in enumerate(chapters) if c["kind"] == "footage"]
+
+    if not foot_idx:
+        for j, k in enumerate(img_idx):
+            counts[k] = n // len(img_idx) + (1 if j < n % len(img_idx) else 0)
+        return counts
+
+    cap = int(max(0, min(len(img_idx), round(n * JOURNEY_IMAGE_FRACTION))))
+    if 0 < cap < len(img_idx):
+        step = len(img_idx) / cap
+        keep = {img_idx[min(len(img_idx) - 1, int((j + 0.5) * step))] for j in range(cap)}
+    else:
+        keep = set(img_idx) if cap > 0 else set()
+    for k in keep:
+        counts[k] = 1
+
+    remaining = n - len(keep)
+    weights = [max(1e-6, budget.get(chapters[k]["src"], 0.0)) for k in foot_idx]
+    if remaining >= len(foot_idx):
+        extra = _largest_remainder(weights, remaining - len(foot_idx))
+        alloc = [1 + e for e in extra]
+    else:
+        alloc = _largest_remainder(weights, remaining)
+    for j, k in enumerate(foot_idx):
+        counts[k] = alloc[j]
+    return counts
+
+
+def _build_journey_sequence(
+    profiles: Sequence[Dict],
+    candidates: Sequence[Dict],
+    edge_buffer_seconds: float,
+    preferred_videos: set[str],
+    first_video: str | None,
+    last_video: str | None,
+    image_capture_times: Dict[str, float] | None = None,
+    debug_callback=None,
+) -> List[Dict]:
+    """Forward-only chronological plan: footage never revisits an earlier source moment.
+
+    Footage sources and still-image loops are merged into one capture-time-ordered
+    list of chapters and played back in that order, so a photo taken between two
+    clips appears between them. Within a footage source a cursor only moves forward.
+    Photos without a real capture date are spread evenly across the trip. When a
+    source underfills its share the next chapter absorbs the gap; only if the whole
+    timeline still comes up short does the previous shot hold or a still repeat, so
+    the plan is never wrapped back to the beginning. Returns [] to let the caller
+    fall back.
+    """
+    n = len(profiles)
+    if n == 0:
+        return []
+
+    by_video: Dict[str, List[Dict]] = {}
+    for c in candidates:
+        vf = str(c.get("video_file") or "")
+        if vf:
+            by_video.setdefault(vf, []).append(c)
+    for vf in by_video:
+        by_video[vf].sort(key=lambda c: float(c.get("start", 0.0)))
+
+    footage = [v for v in by_video if not _is_image_loop_video(v)]
+    stills = [v for v in by_video if _is_image_loop_video(v)]
+
+    usable = {v: _source_usable_seconds(by_video[v], edge_buffer_seconds) for v in footage}
+    footage = [v for v in footage if usable[v] >= 0.2]
+    if not footage and not stills:
+        return []
+
+    # Merge footage + stills into one capture-time-ordered list of chapters.
+    footage_ts = {v: get_recording_timestamp(v) for v in footage}
+    known_still_ts = {
+        v: float((image_capture_times or {}).get(v))
+        for v in stills
+        if (image_capture_times or {}).get(v) and float((image_capture_times or {}).get(v)) > _MIN_PLAUSIBLE_TS
+    }
+    if footage_ts:
+        lo = min(footage_ts.values())
+        span = (max(footage_ts.values()) - lo) or 1.0
+    else:
+        lo, span = 0.0, 1.0
+    unknown_stills = [v for v in stills if v not in known_still_ts]
+    for j, v in enumerate(unknown_stills):
+        known_still_ts[v] = lo + span * (j + 0.5) / max(1, len(unknown_stills))
+
+    chapters: List[Dict] = [{"kind": "footage", "src": v, "ts": footage_ts[v]} for v in footage]
+    chapters += [{"kind": "image", "src": v, "ts": known_still_ts[v]} for v in stills]
+    chapters.sort(key=lambda c: (c["ts"], 0 if c["kind"] == "footage" else 1, os.path.basename(c["src"])))
+
+    budget: Dict[str, float] = {}
+    if footage:
+        mean_usable = sum(usable.values()) / len(footage)
+        raw = {}
+        for v in footage:
+            bonus = (usable[v] / mean_usable) ** 0.5 if mean_usable > 0 else 1.0
+            raw[v] = max(0.4, min(JOURNEY_SOURCE_BONUS_CAP, bonus))
+        budget = dict(raw)  # relative weights; _largest_remainder handles the scaling
+
+    counts = _journey_chapter_counts(chapters, n, budget)
+
+    if debug_callback:
+        shown = ", ".join(
+            f"{'IMG:' if c['kind'] == 'image' else ''}{os.path.basename(c['src'])}x{counts[k]}"
+            for k, c in enumerate(chapters) if counts[k]
+        )
+        debug_callback(f"Journey chapters (capture time): {shown}")
+
+    cursor: Dict[str, float] = {}
+    planned: Dict[int, Dict] = {}
+    last_video_clip: Dict | None = None
+    seg = 0
+    deficit = 0
+
+    for k, chapter in enumerate(chapters):
+        quota = counts[k] + deficit
+        got = 0
+        src = chapter["src"]
+        if chapter["kind"] == "footage":
+            while got < quota and seg < n:
+                profile = profiles[seg]
+                pick = _journey_forward_start(
+                    by_video[src], profile, cursor.get(src, 0.0), edge_buffer_seconds
+                )
+                if pick is None:
+                    break
+                cand, start = pick
+                planned[seg] = _materialize_clip(cand, profile, seg, start_time=start)
+                cursor[src] = start + max(0.05, float(profile["duration"]))
+                last_video_clip = planned[seg]
+                seg += 1
+                got += 1
+        else:
+            while got < quota and seg < n:
+                profile = profiles[seg]
+                cand = _journey_best_still(by_video[src], profile)
+                if cand is None:
+                    break
+                planned[seg] = _materialize_clip(cand, profile, seg)
+                last_video_clip = None
+                seg += 1
+                got += 1
+        deficit = quota - got
+
+    # Tail: chapters are spent but segments remain (a source underfilled, or there is
+    # simply not enough material). Fill without ever wrapping footage.
+    held = 0
+    while seg < n:
+        profile = profiles[seg]
+        source_duration = max(0.05, float(profile["duration"]))
+        if stills:
+            v = stills[seg % len(stills)]
+            cand = _journey_best_still(by_video[v], profile)
+            if cand is not None:
+                planned[seg] = _materialize_clip(cand, profile, seg)
+                last_video_clip = None
+                seg += 1
+                continue
+        if last_video_clip is not None and held < JOURNEY_MAX_HOLD_SEGMENTS:
+            vf = str(last_video_clip.get("video_file") or "")
+            src_cands = by_video.get(vf) or []
+            video_duration = float(src_cands[0].get("video_duration")) if src_cands else 0.0
+            hold_start = float(last_video_clip["start_time"]) + float(last_video_clip["source_duration"])
+            if video_duration <= 0.0 or hold_start + source_duration <= video_duration + 1e-6:
+                cont = dict(last_video_clip)
+                cont.update({
+                    "index": seg,
+                    "start_time": hold_start,
+                    "source_duration": source_duration,
+                    "final_duration": source_duration,
+                    "candidate_id": f"journey_hold_{seg:05d}",
+                    "tags": sorted(set((last_video_clip.get("tags") or []) + ["journey_hold"])),
+                    "audio_start": profile.get("start"),
+                    "audio_end": profile.get("end"),
+                    "wave": profile.get("wave"),
+                    "impact": profile.get("impact"),
+                })
+                planned[seg] = cont
+                last_video_clip = cont
+                held += 1
+                seg += 1
+                continue
+        if seg - 1 in planned:
+            repeat = dict(planned[seg - 1])
+            repeat.update({
+                "index": seg,
+                "candidate_id": f"journey_repeat_{seg:05d}",
+                "audio_start": profile.get("start"),
+                "audio_end": profile.get("end"),
+            })
+            planned[seg] = repeat
+            seg += 1
+            continue
+        return []
+
+    # Honour Start/End-Video pins (a footage source overrides its chronological slot);
+    # _enforce_pinned_endpoints() in video_processor is the final backstop.
+    for pin, idx in ((first_video, 0), (last_video, n - 1)):
+        pin = str(pin) if pin else ""
+        if not pin or pin not in by_video or _is_image_loop_video(pin):
+            continue
+        if idx in planned and str(planned[idx].get("video_file") or "") == pin:
+            continue
+        pick = _journey_forward_start(by_video[pin], profiles[idx], 0.0, edge_buffer_seconds)
+        if pick is not None:
+            cand, start = pick
+            planned[idx] = _materialize_clip(cand, profiles[idx], idx, start_time=start)
+
+    result = [planned[i] for i in range(n) if i in planned]
+    return result if len(result) == n else []
 
 
 def summarize_clip_plan(plan: Sequence[Dict]) -> Dict:

@@ -116,6 +116,7 @@ from video_processor import (
     create_music_video,
     is_image_source,
     prepare_visual_sources,
+    build_image_capture_time_map,
     get_video_files,
     render_single_clip_preview,
 )
@@ -523,6 +524,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             use_nvenc=use_nvenc, gpu_encoder=gpu_encoder, lossless=is_prores, target_size=target_resolution,
             debug_callback=debug_callback,
         )
+        image_capture_times = build_image_capture_time_map(pre_conversion_paths, local_video_paths)
 
         # prepare_visual_sources() swaps still images for generated loop videos (same
         # order/length). Remap the Start-/End-/preferred-video pins onto those new paths
@@ -591,6 +593,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             text_font_file=get_text_font_path(text_font),
             fade_in_seconds=fade_secs,
             fade_out_seconds=fade_secs,
+            image_capture_times=image_capture_times,
             debug_callback=debug_callback,
         )
 
@@ -1338,7 +1341,7 @@ def create_ui() -> gr.Blocks:
                     )
                     edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=2.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
                     clip_order_mode = gr.Radio(
-                        choices=[('🤖 Automatic (AI selection)', 'auto'), ('📅 Chronological (capture date)', 'chronological'), ('🔤 Alphabetical (file name)', 'name')],
+                        choices=[('🤖 Automatic (AI selection)', 'auto'), ('📅 Chronological (capture date)', 'chronological'), ('🔤 Alphabetical (file name)', 'name'), ('🧭 Journey (chronological, no repeats)', 'journey')],
                         value='auto', label=LABEL_CLIP_ORDER_MODE, info=INFO_CLIP_ORDER_MODE
                     )
                     with gr.Group():
@@ -1386,9 +1389,9 @@ def create_ui() -> gr.Blocks:
                         '1. Pick the render plan of a finished video (press 🔄 to refresh the list).\n'
                         '2. Play the output video and note the timecode where a clip starts too '
                         'early or too late. Type it in (e.g. `1:23`) and press **🔍 Find clip**.\n'
-                        '3. Set an **offset** in seconds: a negative value pulls the clip\'s start '
+                        '3. Drag the **offset** slider: a negative value pulls the clip\'s start '
                         'earlier in its source footage, a positive value pushes it later. Press '
-                        '**▶️ Preview clip** to check the result.\n'
+                        '**▶️ Preview clip** to check the result (the note confirms the offset used).\n'
                         '4. Press **➕ Queue change** to store the offset, then repeat steps 2–4 '
                         'for any other clips.\n'
                         '5. Press **🎬 Re-render with changes** to render a new video with every '
@@ -1406,9 +1409,10 @@ def create_ui() -> gr.Blocks:
                         )
                         find_clip_btn = gr.Button('🔍 Find clip', scale=1)
                     refine_info = gr.Markdown('_Load a render plan to begin._')
-                    offset_input = gr.Number(
-                        label='Offset (seconds)', value=0.0, precision=2, step=0.1,
-                        info='Negative moves the source moment earlier, positive later.'
+                    offset_input = gr.Slider(
+                        label='Offset (seconds)', minimum=-30.0, maximum=30.0, value=0.0, step=0.05,
+                        info='Negative moves the source moment earlier, positive later. '
+                             'Preview and Queue always use the value shown here.'
                     )
                     with gr.Row():
                         preview_clip_btn = gr.Button('▶️ Preview clip')
