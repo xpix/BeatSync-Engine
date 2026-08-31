@@ -324,48 +324,48 @@ def get_startup_header(cpu_count, max_threads, parallel_workers, python_status,
 
 LABEL_AUDIO_FILE = "🎵 Audio File (MP3/WAV/FLAC)"
 LABEL_VIDEO_FILES = "🎥 Video & Image Files (MP4/MKV/JPG/HEIC)"
-LABEL_VIDEO_FOLDER = "📂 Oder: Lokaler Videoordner (Upload überspringen)"
-INFO_VIDEO_FOLDER = "Pfad zu einem Ordner mit Videos/Bildern auf diesem PC. Umgeht den Browser-Upload und ist bei großen Dateien deutlich schneller. Hat Vorrang vor hochgeladenen Dateien."
-LABEL_PREFERRED_VIDEOS = "⭐ Bevorzugte Videos (mehr Clips daraus verwenden)"
-INFO_PREFERRED_VIDEOS = "Markierte Videos werden im fertigen Video bevorzugt und liefern mehr Clips."
+LABEL_VIDEO_FOLDER = "📂 Or: local video folder (skip upload)"
+INFO_VIDEO_FOLDER = "Path to a folder with videos/images on this PC. Bypasses the browser upload and is much faster for large files. Takes precedence over uploaded files."
+LABEL_PREFERRED_VIDEOS = "⭐ Preferred videos (use more clips from them)"
+INFO_PREFERRED_VIDEOS = "Checked videos are favored in the final video and contribute more clips."
 
 LABEL_CUSTOM_FPS = "🎞️ Custom FPS (Frame Rate)"
 INFO_CUSTOM_FPS = "Leave empty for auto-detect, or enter value (24/30/60)"
 
-LABEL_EDGE_BUFFER_SECONDS = "✂️ Rand-Puffer (Sekunden)"
-INFO_EDGE_BUFFER_SECONDS = "Anfang und Ende jedes Quellvideos werden um diese Anzahl Sekunden nicht für Clips verwendet."
+LABEL_EDGE_BUFFER_SECONDS = "✂️ Edge buffer (seconds)"
+INFO_EDGE_BUFFER_SECONDS = "The start and end of every source video are excluded from clips by this many seconds."
 
-LABEL_CLIP_ORDER_MODE = "🔀 Clip-Reihenfolge"
+LABEL_CLIP_ORDER_MODE = "🔀 Clip order"
 INFO_CLIP_ORDER_MODE = (
-    "Legt fest, in welcher Reihenfolge die Quellvideos im fertigen Video verwendet werden. "
-    "Chronologisch nutzt das echte Aufnahmedatum aus den EXIF-/Container-Metadaten; "
-    "fehlt es, wird auf das Datei-Änderungsdatum zurückgegriffen."
+    "Sets the order in which the source videos are used in the final video. "
+    "Chronological uses the real capture date from the EXIF/container metadata; "
+    "if it is missing, the file modification date is used instead."
 )
 
-LABEL_FIRST_VIDEO = "⏮️ Start-Video"
-INFO_FIRST_VIDEO = "Dieses Video liefert den allerersten Clip im fertigen Video."
-LABEL_LAST_VIDEO = "⏭️ End-Video"
-INFO_LAST_VIDEO = "Dieses Video liefert den allerletzten Clip im fertigen Video."
-NO_VIDEO_SELECTION_LABEL = "(keine Auswahl)"
+LABEL_FIRST_VIDEO = "⏮️ First video"
+INFO_FIRST_VIDEO = "This video provides the very first clip in the final video."
+LABEL_LAST_VIDEO = "⏭️ Last video"
+INFO_LAST_VIDEO = "This video provides the very last clip in the final video."
+NO_VIDEO_SELECTION_LABEL = "(no selection)"
 
-LABEL_START_TEXT = "📝 Start-Text"
-LABEL_END_TEXT = "📝 End-Text"
+LABEL_START_TEXT = "📝 Start text"
+LABEL_END_TEXT = "📝 End text"
 LABEL_TEXT_POSITION = "Position"
-LABEL_TEXT_DURATION = "Dauer (Sekunden)"
-INFO_START_TEXT = "Wird am Anfang des Zielvideos eingeblendet. Leer lassen, um keine Einblendung zu verwenden."
-INFO_END_TEXT = "Wird am Ende des Zielvideos eingeblendet. Leer lassen, um keine Einblendung zu verwenden."
+LABEL_TEXT_DURATION = "Duration (seconds)"
+INFO_START_TEXT = "Shown at the start of the output video. Leave empty for no overlay."
+INFO_END_TEXT = "Shown at the end of the output video. Leave empty for no overlay."
 TEXT_POSITION_CHOICES = [
-    ('Oben links', 'top_left'), ('Oben Mitte', 'top_center'), ('Oben rechts', 'top_right'),
-    ('Mitte links', 'middle_left'), ('Zentriert', 'middle_center'), ('Mitte rechts', 'middle_right'),
-    ('Unten links', 'bottom_left'), ('Unten Mitte', 'bottom_center'), ('Unten rechts', 'bottom_right'),
+    ('Top left', 'top_left'), ('Top center', 'top_center'), ('Top right', 'top_right'),
+    ('Middle left', 'middle_left'), ('Centered', 'middle_center'), ('Middle right', 'middle_right'),
+    ('Bottom left', 'bottom_left'), ('Bottom center', 'bottom_center'), ('Bottom right', 'bottom_right'),
 ]
 
-LABEL_TEXT_FONT = "🔤 Schriftart"
-INFO_TEXT_FONT = "Schriftart für Start-/End-Text. Die Vorschau darunter zeigt, wie sie aussieht."
+LABEL_TEXT_FONT = "🔤 Font"
+INFO_TEXT_FONT = "Font for the start/end text. The preview below shows how it looks."
 
-LABEL_FADE_ENABLED = "🎬 Ein-/Ausblenden (Schwarzblende)"
-INFO_FADE_ENABLED = "Video und Ton am Anfang aus Schwarz einblenden und am Ende nach Schwarz ausblenden. Start-/End-Text blendet in der Schwarzblende mit ein bzw. aus."
-LABEL_FADE_DURATION = "Blenden-Dauer (Sekunden)"
+LABEL_FADE_ENABLED = "🎬 Fade in/out (fade to black)"
+INFO_FADE_ENABLED = "Fade video and audio in from black at the start and out to black at the end. Start/end text fades in and out together with the black fade."
+LABEL_FADE_DURATION = "Fade duration (seconds)"
 
 WINDOWS_FONTS_DIR = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')
 
@@ -388,7 +388,7 @@ _TEXT_FONT_CATALOG = [
 ]
 
 DEFAULT_TEXT_FONT = "Arial"
-FONT_PREVIEW_SAMPLE = "Beispiel-Titel · AaBbGg 123"
+FONT_PREVIEW_SAMPLE = "Sample Title · AaBbGg 123"
 
 
 def get_available_text_fonts() -> list:

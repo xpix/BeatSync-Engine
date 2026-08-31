@@ -66,22 +66,22 @@ on top of the upstream engine. All new UI fields are labelled in German.
 
 ### 📂 Local video folder input
 
-*   New **"Lokaler Videoordner"** field: point at a folder of videos/images already on disk to
+*   New **"local video folder"** field: point at a folder of videos/images already on disk to
     skip the browser upload. Much faster for large files and takes priority over uploaded files.
 
 ### 📝 Start / end text overlays
 
-*   Optional burned-in **Start-Text** and **End-Text** titles with 9 position presets
+*   Optional burned-in **Start text** and **End text** titles with 9 position presets
     (corners, edges, centre) and an independent on-screen duration per title. The title
     fields are multi-line; line breaks are passed to `drawtext` via a UTF-8 `textfile`
     (real newlines, so `:` `,` `'` in a title need no escaping).
-*   **Selectable font** ("🔤 Schriftart") from the installed Windows fonts (Arial, Impact,
+*   **Selectable font** ("🔤 Font") from the installed Windows fonts (Arial, Impact,
     Bahnschrift, Georgia, …) with a live browser preview card that renders your actual text
     in the chosen face.
 *   **Auto-sized text:** the font size is derived from the output resolution and title
     length so a short title fills roughly a third of the frame (with a generous floor and
     an overflow cap), instead of the old fixed `fontsize=48`. Outline width scales with it.
-*   **Opening / closing fade** ("🎬 Ein-/Ausblenden (Schwarzblende)"): fade the video and
+*   **Opening / closing fade** ("🎬 Fade in/out (fade to black)"): fade the video and
     audio up from black at the start and down to black at the end over an adjustable
     duration. The `fade` filters run *after* `drawtext`, so a start/end title is dimmed by
     the same ramp — it fades up out of the opening blende and down into the closing one
@@ -89,9 +89,9 @@ on top of the upstream engine. All new UI fields are labelled in German.
 *   Rendered with `add_text_overlays_ffmpeg` (white text, black outline); the re-encode is
     ProRes/NVENC/CPU-aware.
 
-### ✂️ Edge buffer ("Rand-Puffer")
+### ✂️ Edge buffer
 
-*   New **"Rand-Puffer (Sekunden)"** option: ignore N seconds at the start and end of every
+*   New **"Edge buffer (seconds)"** option: ignore N seconds at the start and end of every
     source video when picking clips, threaded through `video_processor.py` and `stage6_av_planner.py`.
 *   Image loops are exempt from the buffer.
 *   **Default changed from `5.0 s` to `2.0 s`** across the GUI, CLI (`--edge-buffer-seconds`),
@@ -99,15 +99,15 @@ on top of the upstream engine. All new UI fields are labelled in German.
 
 ### ⭐ Preferred videos
 
-*   New **"Bevorzugte Videos"** multi-select: marked sources are weighted higher and
+*   New **"Preferred videos"** multi-select: marked sources are weighted higher and
     contribute more clips to the finished video.
 
 ### 🔀 Clip order mode
 
-*   New **"Clip-Reihenfolge"** radio:
-    *   🤖 **Automatisch** – AI/editorial selection (default, upstream behaviour).
-    *   📅 **Chronologisch** – source clips ordered by their **real capture date**.
-    *   🔤 **Alphabetisch** – source videos used in filename order.
+*   New **"Clip order"** radio:
+    *   🤖 **Automatic** – AI/editorial selection (default, upstream behaviour).
+    *   📅 **Chronological** – source clips ordered by their **real capture date**.
+    *   🔤 **Alphabetical** – source videos used in filename order.
 *   Sequential modes fill each source completely before moving to the next one.
 *   Capture date is read by the new `media_time.get_recording_timestamp()`:
     EXIF `DateTimeOriginal` (with `OffsetTimeOriginal` if present) for images via Pillow,

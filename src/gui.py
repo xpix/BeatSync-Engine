@@ -204,6 +204,12 @@ class StageConsoleLogger:
         if message:
             self._write(f"    • {message}\n")
 
+    def note(self, message: str) -> None:
+        """Uncapped, un-indented line that does not need an active stage."""
+        message = self._clean(message)
+        if message:
+            self._write(f"{message}\n")
+
     def end_stage(self) -> None:
         if self.stage_number is None:
             return
@@ -916,7 +922,7 @@ def _rerender_from_plan_impl(state: dict, progress_callback: Callable[[str], Non
 
     def debug_callback(message: str) -> None:
         if console_logger:
-            console_logger.line(message)
+            console_logger.debug(message)
 
     try:
         problems = clip_plan.validate_plan_sources(plan)
@@ -926,6 +932,13 @@ def _rerender_from_plan_impl(state: dict, progress_callback: Callable[[str], Non
         offsets = state.get('offsets') or {}
         sequence, warnings = clip_plan.apply_offsets(plan, offsets)
 
+        if console_logger:
+            console_logger.note(
+                f'Re-rendering {len(sequence)} clips with {len(offsets)} manual offsets '
+                '(analysis stages skipped, timeline unchanged):'
+            )
+            for warn in warnings:
+                console_logger.debug(f'offset warning: {warn}')
         if progress_callback:
             progress_callback(f'Re-rendering {len(sequence)} clips with {len(offsets)} manual offsets...')
 
@@ -1020,11 +1033,15 @@ def _rerender_from_plan_impl(state: dict, progress_callback: Callable[[str], Non
             f'Duration: {time.perf_counter() - started:.1f}s',
         ]
         lines.extend(f'⚠️ {w}' for w in warnings)
+        if console_logger:
+            console_logger.note('Re-render complete: ' + '; '.join(lines[1:]))
         return preview_path, '\n'.join(lines), state
 
     except Exception as exc:
         import traceback
         traceback.print_exc()
+        if console_logger:
+            console_logger.note(f'Re-render failed: {exc}')
         return None, f'❌ Re-render failed: {exc}', state
 
 
@@ -1294,7 +1311,7 @@ def create_ui() -> gr.Blocks:
                 video_input = gr.File(label=LABEL_VIDEO_FILES, file_count='multiple', file_types=['.mp4', '.mkv', '.mov', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.heic', '.heif'], type='filepath', elem_id='video-files-input')
                 video_folder_input = gr.Textbox(
                     label=LABEL_VIDEO_FOLDER, info=INFO_VIDEO_FOLDER,
-                    placeholder=r'z.B. D:\Videos\Rohmaterial', elem_id='video-folder-input'
+                    placeholder=r'e.g. D:\Videos\Source', elem_id='video-folder-input'
                 )
                 preferred_videos_input = gr.CheckboxGroup(
                     label=LABEL_PREFERRED_VIDEOS,
@@ -1321,11 +1338,11 @@ def create_ui() -> gr.Blocks:
                     )
                     edge_buffer_seconds = gr.Number(label=LABEL_EDGE_BUFFER_SECONDS, value=2.0, precision=1, minimum=0.0, info=INFO_EDGE_BUFFER_SECONDS)
                     clip_order_mode = gr.Radio(
-                        choices=[('🤖 Automatisch (KI-Auswahl)', 'auto'), ('📅 Chronologisch (Aufnahmedatum)', 'chronological'), ('🔤 Alphabetisch (Dateiname)', 'name')],
+                        choices=[('🤖 Automatic (AI selection)', 'auto'), ('📅 Chronological (capture date)', 'chronological'), ('🔤 Alphabetical (file name)', 'name')],
                         value='auto', label=LABEL_CLIP_ORDER_MODE, info=INFO_CLIP_ORDER_MODE
                     )
                     with gr.Group():
-                        gr.Markdown('#### 📝 Text-Einblendungen')
+                        gr.Markdown('#### 📝 Text Overlays')
                         start_text = gr.Textbox(label=LABEL_START_TEXT, info=INFO_START_TEXT, lines=2, max_lines=4)
                         with gr.Row():
                             start_text_position = gr.Dropdown(TEXT_POSITION_CHOICES, value='bottom_center', label=LABEL_TEXT_POSITION)
@@ -1361,10 +1378,21 @@ def create_ui() -> gr.Blocks:
                 status_output = gr.Textbox(label='Status', interactive=False, value=get_ready_status(python_status, cuda_status, MAX_THREADS, CPU_COUNT, ffmpeg_status, GPU_AVAILABLE, gpu_info, NVENC_AVAILABLE), lines=4, max_lines=4, elem_id='status-output-box')
                 video_output = gr.Video(label='Generated Music Video', interactive=False, elem_id='generated-video-output')
 
-                with gr.Accordion('🎯 Feinschliff — Clip verschieben', open=False):
+                with gr.Accordion('🎯 Fine-tuning — shift a clip', open=False):
                     gr.Markdown(
                         'Shift a clip\'s source in-point without touching its length. '
-                        'The cut timeline stays frame-identical, so the music sync is preserved.'
+                        'The cut timeline stays frame-identical, so the music sync is preserved.\n\n'
+                        '**How to use it:**\n'
+                        '1. Pick the render plan of a finished video (press 🔄 to refresh the list).\n'
+                        '2. Play the output video and note the timecode where a clip starts too '
+                        'early or too late. Type it in (e.g. `1:23`) and press **🔍 Find clip**.\n'
+                        '3. Set an **offset** in seconds: a negative value pulls the clip\'s start '
+                        'earlier in its source footage, a positive value pushes it later. Press '
+                        '**▶️ Preview clip** to check the result.\n'
+                        '4. Press **➕ Queue change** to store the offset, then repeat steps 2–4 '
+                        'for any other clips.\n'
+                        '5. Press **🎬 Re-render with changes** to render a new video with every '
+                        'queued offset applied.'
                     )
                     with gr.Row():
                         plan_selector = gr.Dropdown(
