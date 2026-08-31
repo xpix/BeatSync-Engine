@@ -466,6 +466,41 @@ def create_clip_parallel(args):
         return (i, None, target_size, None, str(e), elapsed)
 
 
+def render_single_clip_preview(plan: Dict, clip_index: int, offset: float) -> Tuple[str, bool]:
+    """Extract one nudged clip so it can be reviewed before a full re-render.
+
+    Always encodes CPU H.264/mp4 so the browser player can handle it, even when the
+    plan itself targets ProRes. Returns the preview path and whether the requested
+    offset had to be clamped.
+    """
+    from clip_plan import clamp_start, clip_offset_context
+
+    context = clip_offset_context(plan, clip_index)
+    clip_start, was_clamped = clamp_start(plan, clip_index, offset)
+
+    resolution = plan.get('target_resolution')
+    target_size = tuple(resolution) if resolution else get_video_resolution(context['video_file'])
+
+    preview_dir = os.path.join(get_processing_dir(), 'clip_preview')
+    shutil.rmtree(preview_dir, ignore_errors=True)
+    os.makedirs(preview_dir, exist_ok=True)
+    preview_path = os.path.join(preview_dir, f"clip_{clip_index + 1}_{uuid.uuid4().hex[:8]}.mp4")
+
+    success = extract_clip_segment_ffmpeg(
+        video_file=context['video_file'],
+        start_time=clip_start,
+        duration=context['source_duration'],
+        output_file=preview_path,
+        fps=float(plan.get('fps', 30.0)),
+        target_size=target_size,
+        use_nvenc=False,
+        gpu_encoder='none',
+    )
+    if not success:
+        raise RuntimeError(f"Could not extract preview for clip {clip_index + 1}.")
+    return preview_path, was_clamped
+
+
 def _build_non_overlapping_fallback_sequence(
     segment_durations: Sequence[float],
     video_files: Sequence[str],
@@ -804,6 +839,7 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       text_font_file: str | None = None,
                       fade_in_seconds: float = 0.0,
                       fade_out_seconds: float = 0.0,
+                      planned_clip_sequence: Sequence[Dict] | None = None,
                       debug_callback: Callable[[str], None] | None = None) -> str:
     """
     Creates a music video with video clips cut to detected beats.
@@ -838,6 +874,8 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
         text_font_file: .ttf used for the start/end titles
         fade_in_seconds/fade_out_seconds: length of the opening/closing black fade
             (video + audio); any start/end title fades with the blende
+        planned_clip_sequence: a previously rendered plan to re-use verbatim; skips the
+            AV planner entirely so manually nudged clips survive a re-render
 
     Returns:
         Path to output video file
@@ -940,50 +978,69 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
     print(f"⏱️  Cut timeline: {len(selected_beats)} boundaries, {sum(segment_frames)} frames")
     if dropped_boundaries:
         print(f"   ⚠️  Dropped {dropped_boundaries} duplicate/too-close cut boundaries after frame quantization")
-    planned_clip_sequence = build_planned_clip_sequence(
-        cut_times=selected_beats,
-        segment_durations=segment_durations,
-        beat_info=beat_info,
-        video_files=video_files,
-        strict_unique_non_overlap=strict_unique_non_overlap,
-        preferred_videos=preferred_videos,
-        edge_buffer_seconds=edge_buffer_seconds,
-        clip_order_mode=clip_order_mode,
-        first_video=first_video,
-        last_video=last_video,
-        debug_callback=debug_callback,
-    )
-    if not planned_clip_sequence:
-        fallback_warning = (
-            "AV planner (AI/editorial scoring) produced no usable plan; falling back to naive "
-            "sequential fill (no Qwen tags, no quality/beauty/action scoring)."
+    if planned_clip_sequence:
+        # Re-render of a saved plan: keep the stored source moments exactly as they are,
+        # including any manual offsets, so the planner cannot overwrite them.
+        planned_clip_sequence = [dict(clip) for clip in planned_clip_sequence]
+        if len(planned_clip_sequence) != total_clips:
+            raise RuntimeError(
+                f"Supplied clip plan has {len(planned_clip_sequence)} clips but the timeline "
+                f"needs {total_clips}. The plan does not match this audio/FPS combination."
+            )
+        print(f"📋 Using supplied clip plan ({total_clips} clips) — AV planner skipped")
+    else:
+        planned_clip_sequence = build_planned_clip_sequence(
+            cut_times=selected_beats,
+            segment_durations=segment_durations,
+            beat_info=beat_info,
+            video_files=video_files,
+            strict_unique_non_overlap=strict_unique_non_overlap,
+            preferred_videos=preferred_videos,
+            edge_buffer_seconds=edge_buffer_seconds,
+            clip_order_mode=clip_order_mode,
+            first_video=first_video,
+            last_video=last_video,
+            debug_callback=debug_callback,
         )
-        print(f"   ⚠️  {fallback_warning}")
-        if debug_callback:
-            debug_callback(f"Warning: {fallback_warning}")
-        if strict_unique_non_overlap:
-            planned_clip_sequence = _build_non_overlapping_fallback_sequence(
-                segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
-                clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
+        if not planned_clip_sequence:
+            fallback_warning = (
+                "AV planner (AI/editorial scoring) produced no usable plan; falling back to naive "
+                "sequential fill (no Qwen tags, no quality/beauty/action scoring)."
             )
-        else:
-            planned_clip_sequence = _build_legacy_random_fallback_sequence(
-                segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
-                clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
-            )
+            print(f"   ⚠️  {fallback_warning}")
+            if debug_callback:
+                debug_callback(f"Warning: {fallback_warning}")
+            if strict_unique_non_overlap:
+                planned_clip_sequence = _build_non_overlapping_fallback_sequence(
+                    segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
+                    clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
+                )
+            else:
+                planned_clip_sequence = _build_legacy_random_fallback_sequence(
+                    segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
+                    clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
+                )
 
-    # Last-resort guarantee: whichever path built the plan, make sure the very first/last
-    # clip really is the pinned Start-/End-Video if one was requested.
-    planned_clip_sequence = _enforce_pinned_endpoints(
-        planned_clip_sequence, video_files, first_video, last_video,
-        edge_buffer_seconds, debug_callback=debug_callback,
-    )
+        # Last-resort guarantee: whichever path built the plan, make sure the very first/last
+        # clip really is the pinned Start-/End-Video if one was requested.
+        planned_clip_sequence = _enforce_pinned_endpoints(
+            planned_clip_sequence, video_files, first_video, last_video,
+            edge_buffer_seconds, debug_callback=debug_callback,
+        )
 
     if planned_clip_sequence:
         plan_summary = summarize_clip_plan(planned_clip_sequence)
         if beat_info is not None:
             beat_info['clip_plan_summary'] = plan_summary
             render_info["plan_summary"] = plan_summary
+            # Handed to the caller so a render plan can be persisted for later clip nudging.
+            beat_info['render_plan_data'] = {
+                'clips': [dict(clip) for clip in planned_clip_sequence],
+                'segment_durations': [float(d) for d in segment_durations],
+                'beat_times': [float(t) for t in beat_times],
+                'fps': float(fps),
+                'audio_duration': float(audio_duration),
+            }
         print(f"🧠 Auto visual planner: {plan_summary['clip_count']} planned clips")
         print(f"   Sources used: {plan_summary.get('source_count', 0)}")
         print(f"   Targets: {plan_summary.get('targets', {})}")

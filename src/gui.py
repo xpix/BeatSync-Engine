@@ -112,7 +112,15 @@ from paths import (
 gpu_data = GPU_INFO
 gpu_info = f"{gpu_data['name']} ({gpu_data['cuda_version']})" if gpu_data['available'] else "CPU Mode"
 
-from video_processor import create_music_video, is_image_source, prepare_visual_sources, get_video_files
+from video_processor import (
+    create_music_video,
+    is_image_source,
+    prepare_visual_sources,
+    get_video_files,
+    render_single_clip_preview,
+)
+
+import clip_plan
 
 from auto_mode import analyze_beats_auto
 
@@ -363,6 +371,43 @@ def _as_existing_source_paths(file_paths: VideoFilesInput) -> list[str]:
     return [path for path in (_as_existing_source_path(p) for p in file_paths) if path]
 
 
+def _store_render_plan(*, beat_info: dict, output_path: str, audio_file: str,
+                       video_files: VideoFilesInput, target_resolution, processing_mode: str,
+                       is_prores: bool, use_gpu: bool, gpu_encoder: str, max_workers: int,
+                       strict_unique_non_overlap: bool, edge_buffer_seconds: float,
+                       text_settings: dict) -> str | None:
+    """Persist the rendered clip plan so single clips can be nudged later.
+
+    A failure here must never invalidate an otherwise successful render.
+    """
+    plan_data = (beat_info or {}).get('render_plan_data')
+    if not plan_data:
+        return None
+    try:
+        plan = clip_plan.build_render_plan(
+            output_file=output_path,
+            audio_file=audio_file,
+            video_files=video_files,
+            beat_times=plan_data['beat_times'],
+            segment_durations=plan_data['segment_durations'],
+            clips=plan_data['clips'],
+            fps=plan_data['fps'],
+            target_resolution=target_resolution,
+            processing_mode=processing_mode,
+            lossless_mode=is_prores,
+            use_gpu=use_gpu,
+            gpu_encoder=gpu_encoder,
+            max_workers=max_workers,
+            strict_unique_non_overlap=strict_unique_non_overlap,
+            edge_buffer_seconds=edge_buffer_seconds,
+            text_settings=text_settings,
+        )
+        return clip_plan.save_render_plan(plan, clip_plan.plan_path_for_output(output_path))
+    except Exception as exc:
+        print(f"⚠️  Could not save render plan: {exc}")
+        return None
+
+
 def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        output_filename: str, processing_mode: str,
                        custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
@@ -546,6 +591,34 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         # Move to output folder
         shutil.move(result_path, output_path)
 
+        plan_path = _store_render_plan(
+            beat_info=beat_info,
+            output_path=output_path,
+            audio_file=local_audio_path,
+            video_files=local_video_paths,
+            target_resolution=target_resolution,
+            processing_mode=processing_mode,
+            is_prores=is_prores,
+            use_gpu=use_gpu,
+            gpu_encoder=gpu_encoder,
+            max_workers=parallel_workers,
+            strict_unique_non_overlap=bool(strict_unique_non_overlap),
+            edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 2.0,
+            text_settings={
+                'start_text': start_text or '',
+                'start_text_position': start_text_position or 'bottom_center',
+                'start_text_duration': float(start_text_duration) if start_text_duration is not None else 3.0,
+                'end_text': end_text or '',
+                'end_text_position': end_text_position or 'bottom_center',
+                'end_text_duration': float(end_text_duration) if end_text_duration is not None else 3.0,
+                'text_font': text_font,
+                'fade_in_seconds': fade_secs,
+                'fade_out_seconds': fade_secs,
+            },
+        )
+        if plan_path:
+            session_state['last_plan_path'] = plan_path
+
         # Create preview for ProRes if needed
         preview_path = output_path
         if is_prores:
@@ -682,6 +755,315 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
         if message != last_status:
             last_status = message
             yield None, message, session_state
+
+    thread.join()
+    yield result_queue.get()
+
+
+# ---------------------------------------------------------------------------
+# Clip refinement: nudge a single clip's source in-point and re-render
+# ---------------------------------------------------------------------------
+
+def _refine_plan_choices() -> list[tuple[str, str]]:
+    """Saved plans in the output folder, newest first."""
+    choices = []
+    for path in clip_plan.list_render_plans(get_output_dir()):
+        label = os.path.basename(path)[:-len(clip_plan.PLAN_SUFFIX)]
+        choices.append((label, path))
+    return choices
+
+
+def _refine_resolve_plan_path(plan_path: str | None) -> str:
+    """Reject plan paths outside the output folder before reading them."""
+    path = (plan_path or '').strip()
+    if not path:
+        raise ValueError('Please pick a render plan first.')
+    if not clip_plan.is_plan_inside(path, get_output_dir()):
+        raise ValueError('Plan files can only be loaded from the output folder.')
+    if not os.path.isfile(path):
+        raise ValueError('That plan file no longer exists.')
+    return path
+
+
+def _refine_pending_text(state: dict) -> str:
+    offsets = state.get('offsets') or {}
+    if not offsets:
+        return '_No pending changes._'
+    plan = state.get('plan') or {}
+    bounds = clip_plan.timeline_bounds(plan) if plan else []
+    lines = ['**Pending changes:**']
+    for index in sorted(offsets):
+        position = clip_plan.format_timecode(bounds[index][0]) if index < len(bounds) else '?'
+        lines.append(f"- Clip {index + 1} @ {position} → {offsets[index]:+.2f}s")
+    return '\n'.join(lines)
+
+
+def _refine_clip_info(state: dict) -> str:
+    index = state.get('selected_clip')
+    plan = state.get('plan')
+    if plan is None or index is None:
+        return '_No clip selected._'
+    try:
+        context = clip_plan.clip_offset_context(plan, index)
+    except Exception as exc:
+        return f'⚠️ {exc}'
+
+    return (
+        f"**Clip {context['index'] + 1} of {len(plan['clips'])}** · "
+        f"{clip_plan.format_timecode(context['timeline_start'])} – "
+        f"{clip_plan.format_timecode(context['timeline_end'])} "
+        f"({context['segment_duration']:.2f}s)\n\n"
+        f"Source: `{context['source_name']}` "
+        f"({clip_plan.format_timecode(context['video_duration'])} long)\n\n"
+        f"Current in-point: **{clip_plan.format_timecode(context['start_time'])}** · "
+        f"allowed offset **{context['min_offset']:+.2f}s … {context['max_offset']:+.2f}s**"
+    )
+
+
+def refine_load_plan(plan_path: str | None, refine_state: dict):
+    """Load a saved plan and reset any pending edits."""
+    state = {'plan_path': None, 'plan': None, 'selected_clip': None, 'offsets': {}}
+    try:
+        path = _refine_resolve_plan_path(plan_path)
+        plan = clip_plan.load_render_plan(path)
+    except Exception as exc:
+        return state, f'⚠️ {exc}', _refine_pending_text(state), gr.update(value=None)
+
+    state['plan_path'] = path
+    state['plan'] = plan
+    total = clip_plan.timeline_bounds(plan)[-1][1]
+    info = (
+        f"✅ Loaded **{len(plan['clips'])} clips** · total {clip_plan.format_timecode(total)} · "
+        f"{plan['fps']:.2f} FPS\n\nEnter a timecode to pick the clip you want to shift."
+    )
+    return state, info, _refine_pending_text(state), gr.update(value=None)
+
+
+def refine_find_clip(timecode: str, refine_state: dict):
+    """Resolve a timecode from the output video to the clip playing at that moment."""
+    state = dict(refine_state or {})
+    plan = state.get('plan')
+    if not plan:
+        return state, '⚠️ Load a render plan first.', gr.update()
+
+    try:
+        seconds = clip_plan.parse_timecode(timecode)
+        index = clip_plan.clip_at_time(plan, seconds)
+    except Exception as exc:
+        return state, f'⚠️ {exc}', gr.update()
+
+    state['selected_clip'] = index
+    pending = (state.get('offsets') or {}).get(index, 0.0)
+    return state, _refine_clip_info(state), gr.update(value=pending)
+
+
+def refine_preview_clip(offset: float, refine_state: dict):
+    """Render just the nudged clip so it can be checked before a full re-render."""
+    state = dict(refine_state or {})
+    plan = state.get('plan')
+    index = state.get('selected_clip')
+    if not plan or index is None:
+        return None, '⚠️ Pick a clip first.'
+
+    try:
+        preview_path, was_clamped = render_single_clip_preview(plan, index, float(offset or 0.0))
+    except Exception as exc:
+        return None, f'⚠️ Preview failed: {exc}'
+
+    note = f"{_refine_clip_info(state)}\n\n▶️ Preview of clip {index + 1} with offset {float(offset or 0.0):+.2f}s"
+    if was_clamped:
+        note += '\n\n⚠️ Offset was clamped to the source bounds.'
+    return preview_path, note
+
+
+def refine_stage_change(offset: float, refine_state: dict):
+    """Queue an offset without rendering yet."""
+    state = dict(refine_state or {})
+    plan = state.get('plan')
+    index = state.get('selected_clip')
+    if not plan or index is None:
+        return state, '⚠️ Pick a clip first.', _refine_pending_text(state)
+
+    offsets = dict(state.get('offsets') or {})
+    value = float(offset or 0.0)
+    if abs(value) < 1e-6:
+        offsets.pop(index, None)
+        message = f'Clip {index + 1}: change removed.'
+    else:
+        offsets[index] = value
+        message = f'Clip {index + 1}: offset {value:+.2f}s queued.'
+    state['offsets'] = offsets
+    return state, f"{_refine_clip_info(state)}\n\n{message}", _refine_pending_text(state)
+
+
+def refine_clear_changes(refine_state: dict):
+    state = dict(refine_state or {})
+    state['offsets'] = {}
+    return state, _refine_clip_info(state), _refine_pending_text(state)
+
+
+def _rerender_from_plan_impl(state: dict, progress_callback: Callable[[str], None] | None = None,
+                             console_logger: StageConsoleLogger | None = None) -> StatusResult:
+    """Re-render a saved plan with the queued offsets applied.
+
+    The analysis stages are skipped entirely: the timeline and every source moment
+    already live in the plan.
+    """
+    started = time.perf_counter()
+    plan = state.get('plan')
+    if not plan:
+        return None, '⚠️ Load a render plan first.', state
+
+    def debug_callback(message: str) -> None:
+        if console_logger:
+            console_logger.line(message)
+
+    try:
+        problems = clip_plan.validate_plan_sources(plan)
+        if problems:
+            return None, '❌ Cannot re-render:\n' + '\n'.join(problems), state
+
+        offsets = state.get('offsets') or {}
+        sequence, warnings = clip_plan.apply_offsets(plan, offsets)
+
+        if progress_callback:
+            progress_callback(f'Re-rendering {len(sequence)} clips with {len(offsets)} manual offsets...')
+
+        use_gpu = bool(plan.get('use_gpu'))
+        set_gpu_mode(use_gpu)
+        is_prores = bool(plan.get('lossless_mode'))
+        text_settings = plan.get('text_settings') or {}
+
+        name, ext = os.path.splitext(os.path.basename(plan['output_file']))
+        name = re.sub(r'_refined_\d{8}_\d{6}$', '', name)
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'{name}_refined_{timestamp}{ext}'
+        output_path = os.path.join(get_output_dir(), filename)
+
+        work_dir = tempfile.mkdtemp(prefix='beatsync_refine_')
+        temp_output = os.path.join(work_dir, filename)
+        beat_info: dict = {'mode': 'manual_refine'}
+
+        try:
+            result_path = create_music_video(
+                plan['audio_file'], plan['video_files'], plan['beat_times'],
+                output_file=temp_output,
+                start_time=float(plan.get('start_time', 0.0)),
+                end_time=plan.get('end_time'),
+                max_workers=plan.get('max_workers') or PARALLEL_WORKERS,
+                beat_info=beat_info,
+                lossless_mode=is_prores,
+                use_gpu=use_gpu,
+                gpu_encoder=plan.get('gpu_encoder', 'none'),
+                fps=float(plan['fps']),
+                strict_unique_non_overlap=bool(plan.get('strict_unique_non_overlap', True)),
+                edge_buffer_seconds=float(plan.get('edge_buffer_seconds', 2.0)),
+                target_resolution=tuple(plan['target_resolution']) if plan.get('target_resolution') else None,
+                start_text=text_settings.get('start_text', ''),
+                start_text_position=text_settings.get('start_text_position', 'bottom_center'),
+                start_text_duration=float(text_settings.get('start_text_duration', 3.0)),
+                end_text=text_settings.get('end_text', ''),
+                end_text_position=text_settings.get('end_text_position', 'bottom_center'),
+                end_text_duration=float(text_settings.get('end_text_duration', 3.0)),
+                text_font_file=get_text_font_path(text_settings.get('text_font', DEFAULT_TEXT_FONT)),
+                fade_in_seconds=float(text_settings.get('fade_in_seconds', 0.0)),
+                fade_out_seconds=float(text_settings.get('fade_out_seconds', 0.0)),
+                planned_clip_sequence=sequence,
+                debug_callback=debug_callback,
+            )
+            shutil.move(result_path, output_path)
+
+            preview_path = output_path
+            if is_prores:
+                preview_path = os.path.join(work_dir, f'{name}_refined_{timestamp}_preview.mp4')
+                preview_cmd = [FFMPEG_PATH, '-i', output_path, '-c:v', 'libx264',
+                               '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p',
+                               '-y', preview_path]
+                subprocess.run(preview_cmd, capture_output=True, text=True, timeout=300)
+        finally:
+            if not is_prores:
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+        new_plan = clip_plan.build_render_plan(
+            output_file=output_path,
+            audio_file=plan['audio_file'],
+            video_files=plan['video_files'],
+            beat_times=plan['beat_times'],
+            segment_durations=plan['segment_durations'],
+            clips=beat_info.get('render_plan_data', {}).get('clips', sequence),
+            fps=float(plan['fps']),
+            target_resolution=tuple(plan['target_resolution']) if plan.get('target_resolution') else None,
+            start_time=float(plan.get('start_time', 0.0)),
+            end_time=plan.get('end_time'),
+            processing_mode=plan.get('processing_mode', 'cpu'),
+            lossless_mode=is_prores,
+            use_gpu=use_gpu,
+            gpu_encoder=plan.get('gpu_encoder', 'none'),
+            max_workers=plan.get('max_workers'),
+            strict_unique_non_overlap=bool(plan.get('strict_unique_non_overlap', True)),
+            edge_buffer_seconds=float(plan.get('edge_buffer_seconds', 2.0)),
+            text_settings=text_settings,
+        )
+        new_plan_path = clip_plan.save_render_plan(new_plan, clip_plan.plan_path_for_output(output_path))
+
+        # Continue refining from the freshly rendered plan instead of the old one.
+        state = dict(state)
+        state['plan'] = new_plan
+        state['plan_path'] = new_plan_path
+        state['offsets'] = {}
+
+        lines = [
+            '✅ Re-render complete',
+            f'File: {filename}',
+            f'Applied offsets: {len(offsets)}',
+            f'Clips: {len(sequence)} (timeline unchanged)',
+            f'Duration: {time.perf_counter() - started:.1f}s',
+        ]
+        lines.extend(f'⚠️ {w}' for w in warnings)
+        return preview_path, '\n'.join(lines), state
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return None, f'❌ Re-render failed: {exc}', state
+
+
+def refine_rerender(refine_state: dict) -> Iterator[StatusResult]:
+    status_queue: queue.Queue[str | None] = queue.Queue()
+    result_queue: queue.Queue[StatusResult] = queue.Queue(maxsize=1)
+    console_logger = StageConsoleLogger(sys.__stdout__)
+    quiet_console = QuietConsole()
+    state = dict(refine_state or {})
+    initial_status = 'Re-rendering from saved plan...'
+
+    def progress_callback(message: str) -> None:
+        status_queue.put(message)
+
+    def worker() -> None:
+        try:
+            with contextlib.redirect_stdout(quiet_console), contextlib.redirect_stderr(quiet_console):
+                result = _rerender_from_plan_impl(state, progress_callback, console_logger)
+        except Exception as exc:
+            console_logger.line(f'Error: {exc}')
+            result = None, f'❌ Error: {exc}', state
+        finally:
+            console_logger.finish()
+        result_queue.put(result)
+        status_queue.put(None)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    last_status = initial_status
+    yield None, initial_status, state
+
+    while True:
+        message = status_queue.get()
+        if message is None:
+            break
+        if message != last_status:
+            last_status = message
+            yield None, message, state
 
     thread.join()
     yield result_queue.get()
@@ -900,6 +1282,7 @@ def create_ui() -> gr.Blocks:
     app = gr.Blocks(title='BeatSync Engine', theme='ocean', css=STATUS_BOX_CSS)
     with app:
         session_state = gr.State({})
+        refine_state = gr.State({'plan_path': None, 'plan': None, 'selected_clip': None, 'offsets': {}})
 
         gr.Markdown(f"# {UI_TITLE}")
         gr.Markdown(UI_MAIN_DESCRIPTION)
@@ -977,7 +1360,37 @@ def create_ui() -> gr.Blocks:
                 gr.Markdown('### 📺 Output')
                 status_output = gr.Textbox(label='Status', interactive=False, value=get_ready_status(python_status, cuda_status, MAX_THREADS, CPU_COUNT, ffmpeg_status, GPU_AVAILABLE, gpu_info, NVENC_AVAILABLE), lines=4, max_lines=4, elem_id='status-output-box')
                 video_output = gr.Video(label='Generated Music Video', interactive=False, elem_id='generated-video-output')
-                
+
+                with gr.Accordion('🎯 Feinschliff — Clip verschieben', open=False):
+                    gr.Markdown(
+                        'Shift a clip\'s source in-point without touching its length. '
+                        'The cut timeline stays frame-identical, so the music sync is preserved.'
+                    )
+                    with gr.Row():
+                        plan_selector = gr.Dropdown(
+                            label='Render plan', choices=_refine_plan_choices(), value=None,
+                            allow_custom_value=False, scale=4
+                        )
+                        refresh_plans_btn = gr.Button('🔄', scale=1)
+                    with gr.Row():
+                        timecode_input = gr.Textbox(
+                            label='Timecode in the output video', placeholder='1:23', scale=3
+                        )
+                        find_clip_btn = gr.Button('🔍 Find clip', scale=1)
+                    refine_info = gr.Markdown('_Load a render plan to begin._')
+                    offset_input = gr.Number(
+                        label='Offset (seconds)', value=0.0, precision=2, step=0.1,
+                        info='Negative moves the source moment earlier, positive later.'
+                    )
+                    with gr.Row():
+                        preview_clip_btn = gr.Button('▶️ Preview clip')
+                        stage_change_btn = gr.Button('➕ Queue change')
+                        clear_changes_btn = gr.Button('🗑️ Clear all')
+                    clip_preview = gr.Video(label='Clip preview', interactive=False)
+                    pending_changes_view = gr.Markdown('_No pending changes._')
+                    rerender_btn = gr.Button('🎬 Re-render with changes', variant='primary')
+
+
         process_btn.click(
             fn=process_video,
             inputs=[
@@ -991,6 +1404,48 @@ def create_ui() -> gr.Blocks:
             ],
             outputs=[video_output, status_output, session_state],
             show_progress='hidden'
+        ).then(
+            fn=lambda state: gr.update(choices=_refine_plan_choices(), value=(state or {}).get('last_plan_path')),
+            inputs=[session_state], outputs=[plan_selector],
+        )
+
+        refresh_plans_btn.click(
+            fn=lambda: gr.update(choices=_refine_plan_choices()), outputs=[plan_selector],
+        )
+        plan_selector.change(
+            fn=refine_load_plan, inputs=[plan_selector, refine_state],
+            outputs=[refine_state, refine_info, pending_changes_view, clip_preview],
+        )
+        find_clip_btn.click(
+            fn=refine_find_clip, inputs=[timecode_input, refine_state],
+            outputs=[refine_state, refine_info, offset_input],
+        )
+        timecode_input.submit(
+            fn=refine_find_clip, inputs=[timecode_input, refine_state],
+            outputs=[refine_state, refine_info, offset_input],
+        )
+        preview_clip_btn.click(
+            fn=refine_preview_clip, inputs=[offset_input, refine_state],
+            outputs=[clip_preview, refine_info],
+        )
+        stage_change_btn.click(
+            fn=refine_stage_change, inputs=[offset_input, refine_state],
+            outputs=[refine_state, refine_info, pending_changes_view],
+        )
+        clear_changes_btn.click(
+            fn=refine_clear_changes, inputs=[refine_state],
+            outputs=[refine_state, refine_info, pending_changes_view],
+        )
+        rerender_btn.click(
+            fn=refine_rerender, inputs=[refine_state],
+            outputs=[video_output, status_output, refine_state],
+            show_progress='hidden',
+        ).then(
+            fn=lambda state: (
+                gr.update(choices=_refine_plan_choices(), value=(state or {}).get('plan_path')),
+                _refine_pending_text(state or {}),
+            ),
+            inputs=[refine_state], outputs=[plan_selector, pending_changes_view],
         )
 
         text_font.change(
