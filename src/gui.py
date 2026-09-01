@@ -419,7 +419,6 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
                        output_filename: str, processing_mode: str,
                        custom_fps: float, strict_unique_non_overlap: bool, session_state: dict,
                        video_folder_path: str = '',
-                       preferred_videos: VideoFilesInput | None = None,
                        edge_buffer_seconds: float = 2.0,
                        clip_order_mode: str = 'auto',
                        first_video: str | None = None,
@@ -527,7 +526,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
         image_capture_times = build_image_capture_time_map(pre_conversion_paths, local_video_paths)
 
         # prepare_visual_sources() swaps still images for generated loop videos (same
-        # order/length). Remap the Start-/End-/preferred-video pins onto those new paths
+        # order/length). Remap the Start-/End-Video pins onto those new paths
         # so an image pin still matches an entry in the analyzed source library.
         _source_path_remap = {
             _as_existing_source_path(old): new
@@ -541,10 +540,7 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
 
         first_video = _remap_pin(first_video)
         last_video = _remap_pin(last_video)
-        preferred_videos = [
-            _remap_pin(p) for p in (preferred_videos or []) if _remap_pin(p)
-        ]
-            
+
         # Prepare output paths
         output_folder = get_output_dir()
         os.makedirs(output_folder, exist_ok=True)
@@ -578,7 +574,6 @@ def _process_video_impl(audio_file: str, video_files: VideoFilesInput,
             beat_info=beat_info, lossless_mode=is_prores,
             use_gpu=use_gpu, gpu_encoder=gpu_encoder, fps=output_fps,
             strict_unique_non_overlap=bool(strict_unique_non_overlap),
-            preferred_videos=_as_existing_source_paths(preferred_videos),
             edge_buffer_seconds=float(edge_buffer_seconds) if edge_buffer_seconds is not None else 2.0,
             clip_order_mode=clip_order_mode or 'auto',
             first_video=_as_existing_source_path(first_video),
@@ -687,7 +682,6 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                  output_filename: str, processing_mode: str,
                  custom_fps: float, strict_unique_non_overlap: bool,
                  session_state: dict, video_folder_path: str = '',
-                 preferred_videos: VideoFilesInput | None = None,
                  edge_buffer_seconds: float = 2.0,
                  clip_order_mode: str = 'auto',
                  first_video: str | None = None,
@@ -725,7 +719,6 @@ def process_video(audio_file: str, video_files: VideoFilesInput,
                     strict_unique_non_overlap=bool(strict_unique_non_overlap),
                     session_state=session_state,
                     video_folder_path=video_folder_path,
-                    preferred_videos=preferred_videos,
                     edge_buffer_seconds=edge_buffer_seconds,
                     clip_order_mode=clip_order_mode,
                     first_video=first_video,
@@ -1163,7 +1156,7 @@ def _get_upload_state_file() -> str:
 
 
 def _load_upload_state() -> dict:
-    state = {'audio': None, 'videos': [], 'video_folder': None, 'preferred': [], 'first_video': None, 'last_video': None}
+    state = {'audio': None, 'videos': [], 'video_folder': None, 'first_video': None, 'last_video': None}
     state_file = _get_upload_state_file()
     if os.path.exists(state_file):
         try:
@@ -1183,7 +1176,7 @@ def _save_upload_state(state: dict) -> None:
 
 
 def _video_choice_pairs(video_paths: list) -> list:
-    """(label, value) pairs for the preferred-videos checkbox group: basename shown, full path used."""
+    """(label, value) pairs for the Start-/End-Video dropdowns: basename shown, full path used."""
     return [(os.path.basename(p), p) for p in (video_paths or [])]
 
 
@@ -1212,15 +1205,12 @@ def _persist_video_upload(video_paths: list | None):
     state = _load_upload_state()
     video_paths = video_paths or []
     state['videos'] = video_paths
-    surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
-    state['preferred'] = surviving_preferred
     surviving_first = state.get('first_video') if state.get('first_video') in video_paths else None
     surviving_last = state.get('last_video') if state.get('last_video') in video_paths else None
     state['first_video'] = surviving_first
     state['last_video'] = surviving_last
     _save_upload_state(state)
     return (
-        gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_first or ''),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_last or ''),
     )
@@ -1231,24 +1221,15 @@ def _persist_video_folder(folder_path: str | None):
     state = _load_upload_state()
     state['video_folder'] = folder_path or None
     video_paths = _scan_video_folder(folder_path) if folder_path else (state.get('videos') or [])
-    surviving_preferred = [p for p in state.get('preferred', []) if p in video_paths]
-    state['preferred'] = surviving_preferred
     surviving_first = state.get('first_video') if state.get('first_video') in video_paths else None
     surviving_last = state.get('last_video') if state.get('last_video') in video_paths else None
     state['first_video'] = surviving_first
     state['last_video'] = surviving_last
     _save_upload_state(state)
     return (
-        gr.update(choices=_video_choice_pairs(video_paths), value=surviving_preferred),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_first or ''),
         gr.update(choices=_video_choice_pairs_with_none(video_paths), value=surviving_last or ''),
     )
-
-
-def _persist_preferred_videos(preferred_paths: list | None) -> None:
-    state = _load_upload_state()
-    state['preferred'] = preferred_paths or []
-    _save_upload_state(state)
 
 
 def _persist_first_video(path: str | None) -> None:
@@ -1276,13 +1257,11 @@ def _restore_uploads():
     # Choices can come from a scanned folder, but the File component's value must stay
     # limited to files Gradio actually uploaded/cached, or it rejects external paths.
     choice_paths = _scan_video_folder(video_folder) or uploaded_video_paths
-    preferred_paths = [p for p in state.get('preferred', []) if p in choice_paths]
     first_video = state.get('first_video') if state.get('first_video') in choice_paths else None
     last_video = state.get('last_video') if state.get('last_video') in choice_paths else None
 
     return (
         audio_path, (uploaded_video_paths or None), video_folder,
-        gr.update(choices=_video_choice_pairs(choice_paths), value=preferred_paths),
         gr.update(choices=_video_choice_pairs_with_none(choice_paths), value=first_video or ''),
         gr.update(choices=_video_choice_pairs_with_none(choice_paths), value=last_video or ''),
     )
@@ -1315,11 +1294,6 @@ def create_ui() -> gr.Blocks:
                 video_folder_input = gr.Textbox(
                     label=LABEL_VIDEO_FOLDER, info=INFO_VIDEO_FOLDER,
                     placeholder=r'e.g. D:\Videos\Source', elem_id='video-folder-input'
-                )
-                preferred_videos_input = gr.CheckboxGroup(
-                    label=LABEL_PREFERRED_VIDEOS,
-                    info=INFO_PREFERRED_VIDEOS,
-                    choices=[], value=[], elem_id='preferred-videos-input'
                 )
                 with gr.Row():
                     first_video_input = gr.Dropdown(
@@ -1428,7 +1402,7 @@ def create_ui() -> gr.Blocks:
             inputs=[
                 audio_input, video_input,
                 output_filename, processing_mode, custom_fps, strict_mode,
-                session_state, video_folder_input, preferred_videos_input, edge_buffer_seconds, clip_order_mode,
+                session_state, video_folder_input, edge_buffer_seconds, clip_order_mode,
                 first_video_input, last_video_input,
                 start_text, start_text_position, start_text_duration,
                 end_text, end_text_position, end_text_duration, text_font,
@@ -1496,23 +1470,22 @@ def create_ui() -> gr.Blocks:
         audio_input.change(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
         video_input.change(
             fn=_persist_video_upload, inputs=[video_input],
-            outputs=[preferred_videos_input, first_video_input, last_video_input]
+            outputs=[first_video_input, last_video_input]
         )
         video_folder_input.submit(
             fn=_persist_video_folder, inputs=[video_folder_input],
-            outputs=[preferred_videos_input, first_video_input, last_video_input]
+            outputs=[first_video_input, last_video_input]
         )
         # Also react on blur/paste (not just Enter) so the dropdowns populate reliably.
         video_folder_input.change(
             fn=_persist_video_folder, inputs=[video_folder_input],
-            outputs=[preferred_videos_input, first_video_input, last_video_input]
+            outputs=[first_video_input, last_video_input]
         )
-        preferred_videos_input.change(fn=_persist_preferred_videos, inputs=[preferred_videos_input], outputs=[])
         first_video_input.change(fn=_persist_first_video, inputs=[first_video_input], outputs=[])
         last_video_input.change(fn=_persist_last_video, inputs=[last_video_input], outputs=[])
         app.load(
             fn=_restore_uploads, inputs=None,
-            outputs=[audio_input, video_input, video_folder_input, preferred_videos_input, first_video_input, last_video_input]
+            outputs=[audio_input, video_input, video_folder_input, first_video_input, last_video_input]
         )
 
     return app

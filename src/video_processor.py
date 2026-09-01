@@ -523,7 +523,6 @@ def render_single_clip_preview(plan: Dict, clip_index: int, offset: float) -> Tu
 def _build_non_overlapping_fallback_sequence(
     segment_durations: Sequence[float],
     video_files: Sequence[str],
-    preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
@@ -533,15 +532,13 @@ def _build_non_overlapping_fallback_sequence(
 
     By default (clip_order_mode="auto") the planner places segments sequentially
     within each source file and rotates across files, so selected source ranges
-    are never reused or overlapped. Preferred sources appear more often in the
-    rotation so more clips are drawn from them.
+    are never reused or overlapped.
 
     When clip_order_mode is "chronological" or "name", video_files is sorted
     accordingly and each source video is filled completely before moving on to
     the next one, so clips appear in that fixed source-video order in the output.
     """
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
-    preferred_set = {str(p) for p in preferred_videos if p}
     sequential_fill = clip_order_mode in ("chronological", "name", "journey")
     if sequential_fill:
         video_files = _sort_video_files(video_files, clip_order_mode)
@@ -554,9 +551,6 @@ def _build_non_overlapping_fallback_sequence(
         if duration > 0.06:
             entry = {"video_file": video_file, "video_duration": duration}
             sources.append(entry)
-            # Repeat preferred sources in the rotation order to bias more clips toward them.
-            if not sequential_fill and video_file in preferred_set:
-                sources.extend({"video_file": video_file, "video_duration": duration} for _ in range(3))
 
     if not sources:
         return []
@@ -628,7 +622,6 @@ def _build_non_overlapping_fallback_sequence(
 def _build_legacy_random_fallback_sequence(
     segment_durations: Sequence[float],
     video_files: Sequence[str],
-    preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
@@ -644,10 +637,9 @@ def _build_legacy_random_fallback_sequence(
         return []
 
     edge_buffer_seconds = max(0.0, float(edge_buffer_seconds))
-    preferred_set = {str(p) for p in preferred_videos if p}
     sequential = clip_order_mode in ("chronological", "name", "journey")
     ordered_files = _sort_video_files(video_files, clip_order_mode) if sequential else list(video_files)
-    weights = [4.0 if str(f) in preferred_set else 1.0 for f in ordered_files]
+    weights = [1.0 for _ in ordered_files]
 
     durations: Dict[str, float] = {}
     for video_file in ordered_files:
@@ -843,7 +835,6 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                       lossless_mode: bool = False, use_gpu: bool = False, 
                       gpu_encoder: str = 'h264_nvenc', fps: float = None,
                       strict_unique_non_overlap: bool = True,
-                      preferred_videos: Sequence[str] = (),
                       edge_buffer_seconds: float = 2.0,
                       clip_order_mode: str = "auto",
                       first_video: str | None = None,
@@ -1015,7 +1006,6 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
             beat_info=beat_info,
             video_files=video_files,
             strict_unique_non_overlap=strict_unique_non_overlap,
-            preferred_videos=preferred_videos,
             edge_buffer_seconds=edge_buffer_seconds,
             clip_order_mode=clip_order_mode,
             first_video=first_video,
@@ -1033,12 +1023,12 @@ def create_music_video(audio_file: str, video_files: VideoList, beat_times: Beat
                 debug_callback(f"Warning: {fallback_warning}")
             if strict_unique_non_overlap:
                 planned_clip_sequence = _build_non_overlapping_fallback_sequence(
-                    segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
+                    segment_durations, video_files, edge_buffer_seconds=edge_buffer_seconds,
                     clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
                 )
             else:
                 planned_clip_sequence = _build_legacy_random_fallback_sequence(
-                    segment_durations, video_files, preferred_videos, edge_buffer_seconds=edge_buffer_seconds,
+                    segment_durations, video_files, edge_buffer_seconds=edge_buffer_seconds,
                     clip_order_mode=clip_order_mode, first_video=first_video, last_video=last_video,
                 )
 

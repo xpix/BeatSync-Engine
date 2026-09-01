@@ -97,11 +97,6 @@ on top of the upstream engine. All new UI fields are labelled in German.
 *   **Default changed from `5.0 s` to `2.0 s`** across the GUI, CLI (`--edge-buffer-seconds`),
     and pipeline function signatures.
 
-### ⭐ Preferred videos
-
-*   New **"Preferred videos"** multi-select: marked sources are weighted higher and
-    contribute more clips to the finished video.
-
 ### 🔀 Clip order mode
 
 *   New **"Clip order"** radio:

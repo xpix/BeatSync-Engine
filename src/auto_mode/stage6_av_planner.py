@@ -191,7 +191,6 @@ def build_planned_clip_sequence(
     beat_info: Dict | None,
     video_files: Sequence[str],
     strict_unique_non_overlap: bool = True,
-    preferred_videos: Sequence[str] = (),
     edge_buffer_seconds: float = 2.0,
     clip_order_mode: str = "auto",
     first_video: str | None = None,
@@ -223,8 +222,6 @@ def build_planned_clip_sequence(
     if not candidates:
         return []
 
-    preferred_set = {str(p) for p in preferred_videos if p}
-
     cut_times_arr = np.asarray(cut_times, dtype=float)
     durations_arr = np.asarray(segment_durations, dtype=float)
     if cut_times_arr.size < 2 or durations_arr.size == 0:
@@ -237,7 +234,6 @@ def build_planned_clip_sequence(
             profiles=profiles,
             candidates=candidates,
             edge_buffer_seconds=edge_buffer_seconds,
-            preferred_videos=preferred_set,
             first_video=first_video,
             last_video=last_video,
             image_capture_times=image_capture_times,
@@ -293,7 +289,6 @@ def build_planned_clip_sequence(
                 strict_unique_non_overlap=strict_unique_non_overlap,
                 used_candidate_ids=used_candidate_ids,
                 occupied_ranges=occupied_ranges,
-                preferred_videos=preferred_set,
                 edge_buffer_seconds=edge_buffer_seconds,
             ) if pool else None
             if planned_clip is None:
@@ -333,7 +328,6 @@ def build_planned_clip_sequence(
                 strict_unique_non_overlap=strict_unique_non_overlap,
                 used_candidate_ids=used_candidate_ids,
                 occupied_ranges=occupied_ranges,
-                preferred_videos=preferred_set,
                 edge_buffer_seconds=edge_buffer_seconds,
                 video_order=video_order,
                 active_idx=active_video_idx,
@@ -350,7 +344,6 @@ def build_planned_clip_sequence(
                 strict_unique_non_overlap=strict_unique_non_overlap,
                 used_candidate_ids=used_candidate_ids,
                 occupied_ranges=occupied_ranges,
-                preferred_videos=preferred_set,
                 edge_buffer_seconds=edge_buffer_seconds,
             )
 
@@ -402,7 +395,6 @@ def build_planned_clip_sequence(
                 recent_videos=recent_videos,
                 usage=usage,
                 index=i,
-                preferred_videos=preferred_set,
             )
             if not candidate:
                 continue
@@ -551,7 +543,6 @@ def _build_journey_sequence(
     profiles: Sequence[Dict],
     candidates: Sequence[Dict],
     edge_buffer_seconds: float,
-    preferred_videos: set[str],
     first_video: str | None,
     last_video: str | None,
     image_capture_times: Dict[str, float] | None = None,
@@ -826,7 +817,6 @@ def _choose_for_segment(
     strict_unique_non_overlap: bool,
     used_candidate_ids: set[str],
     occupied_ranges: Dict[str, List[tuple[float, float]]],
-    preferred_videos: set[str],
     edge_buffer_seconds: float,
 ) -> Dict | None:
     if strict_unique_non_overlap:
@@ -839,7 +829,6 @@ def _choose_for_segment(
             index=index,
             used_candidate_ids=used_candidate_ids,
             occupied_ranges=occupied_ranges,
-            preferred_videos=preferred_videos,
             edge_buffer_seconds=edge_buffer_seconds,
         )
     candidate = _choose_relaxed_candidate(
@@ -849,7 +838,6 @@ def _choose_for_segment(
         recent_videos=recent_videos,
         usage=usage,
         index=index,
-        preferred_videos=preferred_videos,
     )
     return (
         _materialize_clip(candidate, profile, index, edge_buffer_seconds=edge_buffer_seconds)
@@ -867,7 +855,6 @@ def _select_ordered_segment(
     strict_unique_non_overlap: bool,
     used_candidate_ids: set[str],
     occupied_ranges: Dict[str, List[tuple[float, float]]],
-    preferred_videos: set[str],
     edge_buffer_seconds: float,
     video_order: List[str],
     active_idx: List[int],
@@ -895,7 +882,6 @@ def _select_ordered_segment(
             strict_unique_non_overlap=strict_unique_non_overlap,
             used_candidate_ids=used_candidate_ids,
             occupied_ranges=occupied_ranges,
-            preferred_videos=preferred_videos,
             edge_buffer_seconds=edge_buffer_seconds,
         ) if pool else None
         active_idx[0] += 1
@@ -914,7 +900,6 @@ def _choose_and_materialize_candidate(
     index: int,
     used_candidate_ids: set[str],
     occupied_ranges: Dict[str, List[tuple[float, float]]],
-    preferred_videos: set[str] = frozenset(),
     edge_buffer_seconds: float = 0.0,
 ) -> Dict | None:
     ranked: List[tuple[float, Dict]] = []
@@ -928,16 +913,13 @@ def _choose_and_materialize_candidate(
 
         score = _score_candidate(candidate, profile)
         video_file = str(candidate.get("video_file") or "")
-        is_preferred = video_file in preferred_videos
 
         if cid in recent_ids:
             score -= 0.28
         if video_file in recent_videos:
-            score -= 0.05 if is_preferred else 0.10
+            score -= 0.10
         score -= min(0.28, usage[cid] * 0.10)
-        score -= min(0.18, usage[video_file] * (0.004 if is_preferred else 0.012))
-        if is_preferred:
-            score += 0.32
+        score -= min(0.18, usage[video_file] * 0.012)
 
         candidate_duration = max(0.05, float(candidate.get("duration", required_source)))
         if candidate_duration < required_source * 0.55:
@@ -1069,7 +1051,6 @@ def _choose_relaxed_candidate(
     recent_videos: deque,
     usage: Counter,
     index: int,
-    preferred_videos: set[str] = frozenset(),
 ) -> Dict | None:
     best_candidate = None
     best_score = -999.0
@@ -1079,16 +1060,13 @@ def _choose_relaxed_candidate(
         score = _score_candidate(candidate, profile)
         cid = str(candidate.get("id") or "")
         video_file = str(candidate.get("video_file") or "")
-        is_preferred = video_file in preferred_videos
 
         if cid in recent_ids:
             score -= 0.28
         if video_file in recent_videos:
-            score -= 0.05 if is_preferred else 0.10
+            score -= 0.10
         score -= min(0.28, usage[cid] * 0.10)
-        score -= min(0.18, usage[video_file] * (0.004 if is_preferred else 0.012))
-        if is_preferred:
-            score += 0.32
+        score -= min(0.18, usage[video_file] * 0.012)
 
         required_source = max(0.05, float(profile.get("duration", 0.05)))
         candidate_duration = max(0.05, float(candidate.get("duration", required_source)))

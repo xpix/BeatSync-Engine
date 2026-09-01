@@ -326,8 +326,6 @@ LABEL_AUDIO_FILE = "🎵 Audio File (MP3/WAV/FLAC)"
 LABEL_VIDEO_FILES = "🎥 Video & Image Files (MP4/MKV/JPG/HEIC)"
 LABEL_VIDEO_FOLDER = "📂 Or: local video folder (skip upload)"
 INFO_VIDEO_FOLDER = "Path to a folder with videos/images on this PC. Bypasses the browser upload and is much faster for large files. Takes precedence over uploaded files."
-LABEL_PREFERRED_VIDEOS = "⭐ Preferred videos (use more clips from them)"
-INFO_PREFERRED_VIDEOS = "Checked videos are favored in the final video and contribute more clips."
 
 LABEL_CUSTOM_FPS = "🎞️ Custom FPS (Frame Rate)"
 INFO_CUSTOM_FPS = "Leave empty for auto-detect, or enter value (24/30/60)"
