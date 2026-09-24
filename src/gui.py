@@ -1583,11 +1583,22 @@ def create_ui() -> gr.Blocks:
             inputs=[text_font, start_text, end_text], outputs=[text_font_preview],
         )
 
-        # .input() (user-driven only) avoids a restore feedback loop: .change() also fires when
+        # User-driven-only events avoid a restore feedback loop: .change() also fires when
         # app.load sets these values programmatically, which would immediately re-save and
         # overwrite the just-restored audio/first/last video with mismatched/empty values.
-        audio_input.input(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
-        video_input.input(
+        # gr.File has no .input() event, so upload/clear/delete are used instead to cover
+        # every way a user can change its value.
+        audio_input.upload(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
+        audio_input.clear(fn=_persist_audio_upload, inputs=[audio_input], outputs=[])
+        video_input.upload(
+            fn=_persist_video_upload, inputs=[video_input],
+            outputs=[first_video_input, last_video_input]
+        )
+        video_input.clear(
+            fn=_persist_video_upload, inputs=[video_input],
+            outputs=[first_video_input, last_video_input]
+        )
+        video_input.delete(
             fn=_persist_video_upload, inputs=[video_input],
             outputs=[first_video_input, last_video_input]
         )
