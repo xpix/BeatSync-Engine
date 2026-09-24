@@ -388,9 +388,16 @@ Remove-LegacyPythonPackages $UvExe
 Install-QwenGgufModels
 
 Step "Verifying portable install"
-& $PythonExe -X utf8 -c "import sys, gradio, librosa, cv2, numpy, cupy, numba; print('Python', sys.version.split()[0]); print('gradio', gradio.__version__); print('librosa', librosa.__version__); print('cupy', cupy.__version__); print('numba', numba.__version__); x = cupy.arange(10, dtype=cupy.int32); print('CUDA runtime', cupy.cuda.runtime.runtimeGetVersion()); print('GPU sum', int(cupy.sum(x).get()))"
+& $PythonExe -X utf8 -c "import sys, gradio, librosa, cv2, numpy, cupy, numba; print('Python', sys.version.split()[0]); print('gradio', gradio.__version__); print('librosa', librosa.__version__); print('cupy', cupy.__version__); print('numba', numba.__version__)"
 if ($LASTEXITCODE -ne 0) {
-    throw "Portable app import/CuPy CTK verification failed."
+    throw "Portable app import verification failed."
+}
+
+# Best-effort only: no NVIDIA GPU/driver means CuPy can import but can't run a kernel.
+# The app falls back to CPU in that case (see gpu_cpu_utils.py), so don't abort install.
+& $PythonExe -X utf8 -c "import cupy; x = cupy.arange(10, dtype=cupy.int32); print('CUDA runtime', cupy.cuda.runtime.runtimeGetVersion()); print('GPU sum', int(cupy.sum(x).get()))"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "No working NVIDIA GPU/driver detected; app will run in CPU-only mode." -ForegroundColor Yellow
 }
 
 & $PythonExe -X utf8 -c "import importlib.util, sys; missing = [name for name in ('torch', 'torchvision', 'torchaudio', 'accelerate', 'transformers', 'safetensors') if importlib.util.find_spec(name) is not None]; print('legacy packages', missing); sys.exit(1 if missing else 0)"
